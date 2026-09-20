@@ -61,6 +61,7 @@ GDI+ 编码 JPEG，纯 ``ctypes``，不依赖 Pillow / ffmpeg / ImageMagick。
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
@@ -259,7 +260,6 @@ if IS_MAC:
 # ================================================================ win32 后端
 # 只放平台原语：抓一帧、注入一个事件。取舍见文件头「Windows（win32 后端）」。
 if IS_WIN:
-    import ctypes
     from ctypes import wintypes
 
     _user32 = ctypes.WinDLL("user32", use_last_error=True)
