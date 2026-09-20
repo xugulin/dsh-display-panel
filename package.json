@@ -24,11 +24,9 @@
     "cordis.patch.yml",
     "service",
     "scripts",
-    "README.md"
+    "README.md",
+    "scripts/publish-npm.sh"
   ],
-  "scripts": {
-    "postinstall": "node scripts/hint.js"
-  },
   "keywords": [
     "dsh",
     "deepseek-harness",
