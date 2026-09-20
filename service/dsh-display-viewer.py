@@ -113,6 +113,49 @@ REQUIRED_TOOLS: dict[str, tuple[tuple[str, str, str], ...]] = {
 }
 
 
+def ensure_token() -> str:
+    """确保本用户的访问令牌存在（``<HOME_DIR>/token``，权限 600）。
+
+    为什么要令牌：服务监听 127.0.0.1，**同一台机器上的其他用户**也能连上来 ——
+    不设防的话，另一个用户的 DSH 面板会看到你的桌面（插件按端口探测，先应答者胜）。
+    令牌放在本用户的 ``~/.cache/dsh-display/``（目录 700），别的用户读不到，
+    于是只有本用户的面板能连上。令牌由插件的**宿主半边**（以该用户身份运行）读出、
+    经宿主自己的接口转交给浏览器 —— 浏览器不需要文件系统权限。
+    """
+    import secrets
+
+    path = os.path.join(HOME_DIR, "token")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            token = fh.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_hex(16)
+    try:
+        os.makedirs(HOME_DIR, exist_ok=True)
+        os.chmod(HOME_DIR, 0o700)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(token)
+        os.chmod(path, 0o600)
+    except OSError as exc:
+        print(f"⚠ 写令牌文件失败（本次不强制校验）：{exc}", flush=True)
+    return token
+
+
+TOKEN = ensure_token()
+
+
+def token_ok(path: str) -> bool:
+    """请求是否带对令牌（``?k=<token>``）。没有令牌（写文件失败）时不设防。"""
+    if not TOKEN:
+        return True
+    from urllib.parse import parse_qs, urlparse
+
+    return parse_qs(urlparse(path).query).get("k", [""])[0] == TOKEN
+
+
 def missing_tools() -> list[dict[str, str]]:
     """返回缺失的依赖（命令 / 用途 / 常见包名）。
 
@@ -906,6 +949,8 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
 <script>
 (function () {{
   var BASE = '{base}';
+  var K = '{k}';            // 访问令牌：宿主半边交给浏览器，页面自己也带着它去拉帧
+  function withToken(url) {{ return K ? url + (url.indexOf('?') < 0 ? '?' : '&') + 'k=' + K : url; }}
   var canvas = document.getElementById('screen');
   var ctx = canvas.getContext('2d');
   var offline = document.getElementById('offline');
@@ -926,12 +971,12 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
       offline.style.display = 'block';
       setTimeout(pull, 1000);           // 失败就重试
     }};
-    im.src = BASE + '/snapshot?t=' + Date.now();
+    im.src = withToken(BASE + '/snapshot?t=' + Date.now());
   }})();
   var img = canvas;
   // 空闲提示：每 2 秒问一次该显示上有几个窗口；没有窗口就提示，避免"全黑=坏了"的误解
   (function pollState() {{
-    fetch(BASE + '/state?t=' + Date.now(), {{ cache: 'no-store' }})
+    fetch(withToken(BASE + '/state?t=' + Date.now()), {{ cache: 'no-store' }})
       .then(function (r) {{ return r.json(); }})
       .then(function (d) {{
         document.getElementById('idle').style.display =
@@ -947,7 +992,7 @@ PAGE = """<!doctype html><meta charset=utf-8><title>DSH 显示器 · {sid}</titl
   }}
   function send(o) {{
     try {{
-      fetch(BASE + '/input', {{ method: 'POST', body: JSON.stringify(o) }});
+      fetch(withToken(BASE + '/input'), {{ method: 'POST', body: JSON.stringify(o) }});
     }} catch (e) {{}}
   }}
   img.addEventListener('mousedown', function (ev) {{
@@ -1036,7 +1081,22 @@ class Handler(BaseHTTPRequestHandler):
             return parts[1], "/" + "/".join(parts[2:])
         return None, path
 
+    def _deny(self) -> None:
+        body = json.dumps({
+            "ok": False, "error": "missing or bad token",
+            "hint": "本机其它用户访问不了本服务；请用 DSH 的「显示器」面板，"
+                    "或带上 ?k=<~/.cache/dsh-display/token 的内容>",
+        }).encode()
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self) -> None:                       # noqa: N802 - BaseHTTPRequestHandler
+        if not token_ok(self.path):
+            self._deny()
+            return
         sid, rest = self._split(self.path)
         if sid and rest.rstrip("/") == "/input":
             try:
@@ -1052,6 +1112,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_GET(self) -> None:                        # noqa: N802
+        if not token_ok(self.path):
+            self._deny()
+            return
         sid, rest = self._split(self.path)
         if sid is None:
             with _sessions_lock:
@@ -1165,8 +1228,11 @@ class Handler(BaseHTTPRequestHandler):
         else:
             disp = f"独立显示 {sess.display}"
             note = "点击画面即可操作（鼠标/键盘都会注入回去）"
+        from urllib.parse import parse_qs, urlparse
+
+        k = parse_qs(urlparse(self.path).query).get("k", [""])[0]
         self._send(PAGE.format(base=f"/s/{sid}", sid=sid, disp=disp,
-                               w=W, h=H, note=note).encode(),
+                               w=W, h=H, note=note, k=k).encode(),
                    "text/html; charset=utf-8")
 
 
@@ -1231,6 +1297,7 @@ def main() -> None:
     else:
         print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 {BACKEND} · 每会话独立 "
               f"（/s/<sessionId>/）· {W}x{H} · 支持双向注入", flush=True)
+    print(f"访问令牌：{os.path.join(HOME_DIR, 'token')}（600；本机其它用户读不到）", flush=True)
     miss = missing_tools()
     if miss:
         print("⚠ 缺少依赖，部分功能不可用：", flush=True)
