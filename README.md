@@ -10,6 +10,20 @@
 > A display tab for the DeepSeek Harness Web UI. Watch — and drive — the AI's own
 > headless test display: per-session, fully isolated, with mouse and keyboard injected back.
 
+## 平台支持与验证方式
+
+| 平台 | 状态 | 怎么验证的 |
+|---|---|---|
+| **Linux**（X11 / Wayland 会话都行） | ✅ 支持 | 作者实机 + **12 项功能自测**（`tools/dsh-display-selftest.py`：服务/隔离/画面/鼠标落点/点击/打字/退格/回车/中文）；缺失依赖会在启动日志与 `/state` 里明说该装哪个包 |
+| **Windows 10/11** | ✅ 支持，**零外部依赖** | 社区用户**真机**验证（22 项面板回归 + 11 项注入断言 + 截图证据）；那些断言已搬进 `service/selfcheck.py`。win32 后端纯 ctypes（GDI + GDI+），实测约 34ms/帧 @1920×1080 |
+| **macOS** | ✅ 支持（抓帧等已在 CI 验过；**输入注入需真机**授予「辅助功能」权限） | GitHub Actions 免费 macOS runner：[`macos.yml`](.github/workflows/macos.yml) —— ctypes 绑定（CoreGraphics/CoreFoundation 加载、`CGMainDisplayID()`）、服务启动、令牌校验、HTTP 接口、页面渲染，以及**抓帧成功：63693 字节 / 文件头 `FF D8`（真 JPEG）** |
+| **同机多用户** | ✅ 已隔离 | per-user 令牌（`~/.cache/dsh-display/token`，600；目录 700）+ 宿主半边交接：实测**不带令牌 403 / 带令牌 200**，别的用户读不到令牌也连不上 |
+| **多实例 / 多会话** | ✅ | 端口自动发现（8099→8110）+ 客户端按范围探测；每会话一台独立显示（Linux） |
+
+> CI 是**真跑**的，不是"能 import 就算过"：插件侧跑 ctypes/接口/抓帧，控制台侧跑离屏 GUI 渲染
+> 并把截图作为 artifact 上传。加了 CI 之后**第一轮就抓出一个致命 bug** —— darwin 段用了
+> `ctypes` 却只在 `if IS_WIN:` 里 import，macOS 上一加载就崩，而 Linux 上永远测不出来。
+
 ## 它解决什么问题
 
 AI 做 GUI 相关的活（跑桌面程序、验证界面、登录某个网站）时，人通常看不到它在干什么。
