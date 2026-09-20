@@ -1,6 +1,6 @@
 {
   "name": "dsh-display-panel",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A display tab for the DeepSeek Harness Web UI: watch — and drive — the AI's own headless test display (per-session, isolated, with mouse/keyboard injected back).",
   "main": "lib/index.js",
   "exports": {

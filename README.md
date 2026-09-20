@@ -36,6 +36,32 @@ Windows 上**没有可多开的 headless 显示** ✗ —— 所以 `win32` 后�
 > 服务起不来 = `signal.SIGHUP` 在 Windows 不存在；没有帧源 = 抓帧原本只有 X11/Wayland 两条路）。
 > Linux 的两条路一行未动 ✓ —— 已用 12 项自测回归确认 ✓。
 
+## 安装依赖（Linux）
+
+| 发行版 | 命令 |
+|---|---|
+| Arch / Manjaro | `sudo pacman -S xorg-server-xvfb xdotool xclip imagemagick` |
+| Debian / Ubuntu | `sudo apt install xvfb xdotool xclip imagemagick` |
+| Fedora / RHEL | `sudo dnf install xorg-x11-server-Xvfb xdotool xclip ImageMagick` |
+| openSUSE | `sudo zypper install xvfb-run xdotool xclip ImageMagick` |
+
+* **Windows 什么都不用装** —— `win32` 后端是纯 `ctypes`（GDI + GDI+），零外部依赖；
+* **macOS 暂不支持** ✗（只有 x11 / wayland / win32 三个后端，macOS 上会去试 Xvfb 而系统没有）；
+* **服务会自己检查依赖** ✓：缺哪个命令、是干什么用的、该装哪个包，都会在启动日志、
+  `/state` 接口和面板页面上明说 —— 因为缺工具的表现很隐蔽（缺 `xclip` 只是"中文打不进去"、
+  缺 `import` 只是"画面一直黑"）。
+
+## 多个实例 / 多个用户
+
+服务默认从 **8099** 起监听；如果被占用，会**自动往后找**（8099→8110）并把最终端口写进
+`~/.cache/dsh-display/port` ✓；插件侧则在 8099..8110 范围内探测**第一个应答的**服务 ✓。
+所以同一台机器上跑多个实例（或手工起了两次）不会再"连不上" ✓。
+
+> ⚠️ 但**同一台机器上的不同用户**目前共用同一段端口：插件探测到的是**先应答的那个**
+> （可能是另一个用户的服务）。要严格隔离，请让各用户用不同端口（`DSH_VIEW_PORT=82xx`）
+> 并知道插件只探测 8099..8110。彻底的修法是让插件的宿主半边读取本用户的端口文件，
+> 这一步还没做。
+
 ## 依赖
 
 Linux（X11 底座）+ 以下命令，缺一个都跑不起来：

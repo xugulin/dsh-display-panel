@@ -82,6 +82,38 @@ GRAB_INTERVAL = 0.12 if BACKEND == "win32" else 0.5
 #: 协议注入工具（tools/virtual-pointer 编译产物），只在 wayland 后端用得到。
 VPTR = os.environ.get("DSH_VIEW_VPTR") or os.path.join(HOME_DIR, "vptr", "vptr")
 
+#: 各后端需要的命令：(命令, 用途, 常见包名)。win32 是纯 ctypes，**零外部依赖**。
+REQUIRED_TOOLS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "x11": (
+        ("Xvfb", "虚拟显示服务器", "xorg-server-xvfb / xvfb"),
+        ("xdotool", "鼠标与键盘注入", "xdotool"),
+        ("import", "抓帧（ImageMagick）", "imagemagick"),
+        ("xclip", "中文输入（剪贴板）", "xclip"),
+    ),
+    "wayland": (
+        ("sway", "显示合成器", "sway"),
+        ("grim", "抓帧", "grim"),
+        ("wtype", "键盘注入", "wtype"),
+    ),
+    "win32": (),          # 纯 ctypes，不需要外部命令
+}
+
+
+def missing_tools() -> list[dict[str, str]]:
+    """返回缺失的依赖（命令 / 用途 / 常见包名）。
+
+    为什么要自检：缺工具时的表现**非常隐蔽** —— 缺 ``xclip`` 只是"中文打不进去"、
+    缺 ``import`` 只是"画面一直黑"，用户根本看不出是缺东西（真实反馈过这类问题）。
+    所以启动时查一遍，并且通过 ``/state`` 与页面把那句话说清楚。
+    """
+    import shutil
+
+    missing: list[dict[str, str]] = []
+    for name, why, pkg in REQUIRED_TOOLS.get(BACKEND, ()):
+        if shutil.which(name) is None:
+            missing.append({"tool": name, "why": why, "package": pkg})
+    return missing
+
 
 # ================================================================ win32 后端
 # 只放平台原语：抓一帧、注入一个事件。取舍见文件头「Windows（win32 后端）」。
@@ -956,7 +988,9 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:                    # noqa: BLE001
                     count = -1
             self._send(json.dumps({"session": sid, "display": sess.display,
-                                   "windows": count, "idle": count == 0}).encode(),
+                                   "windows": count, "idle": count == 0,
+                                   "backend": BACKEND, "port": PORT,
+                                   "missing": missing_tools()}).encode(),
                        "application/json")
             return
         if rest == "/display":
@@ -998,6 +1032,34 @@ def _redirect_log() -> None:
         pass
 
 
+def _bind(preferred: int, tries: int = 12) -> "ThreadingHTTPServer":
+    """从 preferred 开始找一个能绑的端口，并把最终端口写进 ``<HOME_DIR>/port``。
+
+    为什么：同一台机器上可能有多个实例（多个用户、或手工起了两次）。原来的行为是
+    端口被占就**直接崩** —— 用户只会看到"面板连不上"，完全看不出原因。
+    现在自动往后找，插件侧则在 8099..8111 范围内探测第一个应答的服务。
+    """
+    last: Exception | None = None
+    for port in range(preferred, preferred + tries):
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        except OSError as exc:                       # 端口被占：换下一个
+            last = exc
+            continue
+        global PORT
+        PORT = port
+        try:
+            os.makedirs(HOME_DIR, exist_ok=True)
+            with open(os.path.join(HOME_DIR, "port"), "w", encoding="utf-8") as fh:
+                fh.write(str(port))
+        except OSError:
+            pass
+        if port != preferred:
+            print(f"  （{preferred} 被占用，改用 {port}）", flush=True)
+        return srv
+    raise SystemExit(f"{preferred}..{preferred + tries - 1} 全部被占用：{last}")
+
+
 def main() -> None:
     import atexit
 
@@ -1011,7 +1073,12 @@ def main() -> None:
     else:
         print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 {BACKEND} · 每会话独立 "
               f"（/s/<sessionId>/）· {W}x{H} · 支持双向注入", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    miss = missing_tools()
+    if miss:
+        print("⚠ 缺少依赖，部分功能不可用：", flush=True)
+        for m in miss:
+            print(f"    {m['tool']} —— {m['why']}（安装：{m['package']}）", flush=True)
+    _bind(PORT, tries=12).serve_forever()
 
 
 if __name__ == "__main__":
