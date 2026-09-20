@@ -1,0 +1,17 @@
+[Unit]
+Description=DSH display panel service (per-session isolated Xvfb + canvas/MJPEG stream)
+Documentation=https://github.com/xugulin/dsh-display-panel#readme
+# 独立单元的意义：harness 重启会按 cgroup 连带清理同一 cgroup 的进程，
+# 若把服务挂在 harness 的 shell 下，每次重启 harness 面板就会"显示器还没有打开"。
+
+[Service]
+Type=simple
+WorkingDirectory=@HERE@
+Environment=DSH_VIEW_PORT=8099
+Environment=DSH_VIEW_BACKEND=x11
+ExecStart=@PYTHON@ @HERE@/service/dsh-display-viewer.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
