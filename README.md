@@ -20,6 +20,22 @@ AI 做 GUI 相关的活（跑桌面程序、验证界面、登录某个网站）
   登录窗口会混进你的画面）；
 * **不碰你的桌面**：显示跑在独立的 headless X 服务器上，不占用你的 VT、不动你的输入设备。
 
+## Windows 使用
+
+Windows 上**没有可多开的 headless 显示** ✗ —— 所以 `win32` 后端抓的是**本机真实桌面**
+（所有会话共用那一块屏 ✓），注入默认**关闭** ✓（只读观看 ✓）。
+
+| 项 | 说明 |
+|---|---|
+| 抓帧 | GDI `BitBlt` + GDI+ 编码 JPEG（**纯 ctypes** ✓ 不依赖 Pillow / ffmpeg ✓ 实测约 34ms/帧 @1920×1080 ✓） |
+| 注入 | `SendInput` ✓ 但**默认关闭** ✗ —— 因为它注入的是**真实鼠标键盘** ✓。要开启：设 `DSH_VIEW_INPUT=1` ✓ |
+| 启动服务 | 双击 `service/windows/启动显示器服务.bat` ✓（无窗口版：`启动显示器服务-Silent.vbs` ✓；停止：`停止显示器服务.bat` ✓ 按 **8099 端口**精确停止 ✓） |
+| 开机自启 | 把 `service/windows/开机自启用-DSH显示器服务.vbs` 放进「启动」文件夹 ✓ |
+
+> Windows 部分的修复由社区用户提供（[修复报告](https://github.com/xugulin/dsh-display-panel) 随包附上：
+> 服务起不来 = `signal.SIGHUP` 在 Windows 不存在；没有帧源 = 抓帧原本只有 X11/Wayland 两条路）。
+> Linux 的两条路一行未动 ✓ —— 已用 12 项自测回归确认 ✓。
+
 ## 依赖
 
 Linux（X11 底座）+ 以下命令，缺一个都跑不起来：
