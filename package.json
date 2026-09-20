@@ -1,6 +1,6 @@
 {
   "name": "dsh-display-panel",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A display tab for the DeepSeek Harness Web UI: watch — and drive — the AI's own headless test display (per-session, isolated, with mouse/keyboard injected back).",
   "main": "lib/index.js",
   "exports": {
@@ -42,5 +42,8 @@
     "type": "git",
     "url": "git+https://github.com/xugulin/dsh-display-panel.git"
   },
-  "homepage": "https://github.com/xugulin/dsh-display-panel#readme"
+  "homepage": "https://github.com/xugulin/dsh-display-panel#readme",
+  "scripts": {
+    "prepack": "rm -rf service/__pycache__ lib/__pycache__ scripts/__pycache__"
+  }
 }
