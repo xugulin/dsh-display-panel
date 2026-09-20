@@ -96,7 +96,10 @@ def main() -> int:
 
     # ---- 通用：页面模板能渲染且没有残留占位符
     try:
-        html = mod.PAGE.format(base="/s/x", sid="s", disp="测试显示", w=1600, h=1000, note="只读")
+        # ⚠️ 模板参数要与服务端渲染处保持一致 —— 少了任何一个都是 KeyError，
+        #    而这一条被 CI 抓到过（服务端加了令牌参数 k，自检这边没跟上）。
+        html = mod.PAGE.format(base="/s/x", sid="s", disp="测试显示", w=1600, h=1000,
+                               note="只读", k="test-token")
         check("页面模板可渲染且无残留占位符",
               "{disp}" not in html and "{base}" not in html and "测试显示" in html)
     except Exception as exc:                             # noqa: BLE001
