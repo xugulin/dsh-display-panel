@@ -54,7 +54,8 @@ GDI+ 编码 JPEG，纯 ``ctypes``，不依赖 Pillow / ffmpeg / ImageMagick。
 
 ``DSH_DISPLAY_HOME``（默认 ~/.cache/dsh-display）、``DSH_VIEW_PORT``（默认 8099）、
 ``DSH_VIEW_SIZE``（默认 1600x1000；win32 下默认取真实屏幕）、
-``DSH_VIEW_BACKEND=x11|wayland|win32``（Windows 上默认 win32，其余默认 x11）、
+``DSH_VIEW_BACKEND=x11|wayland|win32|darwin``（Windows 默认 win32，macOS 默认 darwin，
+其余默认 x11；macOS 后端**尚未真机验证**，属实验性）、
 ``DSH_VIEW_INPUT=1``（仅 win32：允许把点击/按键注入真实桌面，默认关）。
 """
 
@@ -70,15 +71,25 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 IS_WIN = sys.platform == "win32"
+IS_MAC = sys.platform == "darwin"
+#: 抓的是**本机真实桌面**的后端（win32 / darwin）：没有"每会话一台显示"这回事，
+#: 所有会话看的是同一块屏，而且注入进去就是真的动用户的鼠标键盘。
+REAL_DESKTOP_BACKENDS = ("win32", "darwin")
 HOME_DIR = os.environ.get("DSH_DISPLAY_HOME") or os.path.expanduser("~/.cache/dsh-display")
 PORT = int(os.environ.get("DSH_VIEW_PORT", "8099"))
 W, H = (int(x) for x in (os.environ.get("DSH_VIEW_SIZE") or "1600x1000").split("x"))
-BACKEND = (os.environ.get("DSH_VIEW_BACKEND") or ("win32" if IS_WIN else "x11")).strip().lower()
-#: win32 下是否允许把输入注入真实桌面（默认只读观看）。
+BACKEND = (os.environ.get("DSH_VIEW_BACKEND")
+           or ("win32" if IS_WIN else ("darwin" if IS_MAC else "x11"))).strip().lower()
+#: win32 / darwin 下是否允许把输入注入真实桌面（默认只读观看）。
+#: 注意：这两个后端抓的是**本机真实桌面**，注入进去就是真的动用户的鼠标键盘，
+#: 所以默认关闭 —— 想开显式设 DSH_VIEW_INPUT=1。
 WIN_INPUT = (os.environ.get("DSH_VIEW_INPUT") or "").strip().lower() in ("1", "true", "yes", "on")
+MAC_INPUT = WIN_INPUT
 #: 抓帧间隔。win32 是纯本地调用（实测约 34ms/帧），可以贴着页面 130ms 的拉帧节奏来；
 #: X11/Wayland 每次都要起一个外部进程，间隔给大一点，别把 CPU 烧在抓屏上。
-GRAB_INTERVAL = 0.12 if BACKEND == "win32" else 0.5
+#: win32 是进程内 GDI 调用（实测约 34ms/帧），darwin 每次要起一个 screencapture 进程，
+#: X11/Wayland 也都要起外部进程 —— 后两者给大一点，别把 CPU 烧在抓屏上。
+GRAB_INTERVAL = {"win32": 0.12, "darwin": 0.3}.get(BACKEND, 0.5)
 #: 协议注入工具（tools/virtual-pointer 编译产物），只在 wayland 后端用得到。
 VPTR = os.environ.get("DSH_VIEW_VPTR") or os.path.join(HOME_DIR, "vptr", "vptr")
 
@@ -96,6 +107,9 @@ REQUIRED_TOOLS: dict[str, tuple[tuple[str, str, str], ...]] = {
         ("wtype", "键盘注入", "wtype"),
     ),
     "win32": (),          # 纯 ctypes，不需要外部命令
+    "darwin": (
+        ("screencapture", "抓帧（macOS 自带）", "系统自带，无需安装"),
+    ),
 }
 
 
@@ -113,6 +127,90 @@ def missing_tools() -> list[dict[str, str]]:
         if shutil.which(name) is None:
             missing.append({"tool": name, "why": why, "package": pkg})
     return missing
+
+
+# ================================================================ darwin 后端（实验性）
+# ⚠️ 这一段**没有在真机上验证过**（作者手上没有 Mac）—— 逻辑按官方文档写，
+#    每一步都包了异常，失败只记日志、不影响别的后端。欢迎 macOS 用户回报结果。
+#    抓帧用系统自带的 screencapture（无需安装任何东西）；注入用 Quartz 的 CGEvent。
+if IS_MAC:
+    import tempfile
+
+    _cg = ctypes.cdll.LoadLibrary(
+        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    _cf = ctypes.cdll.LoadLibrary(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+
+    class CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+    class CGSize(ctypes.Structure):
+        _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
+
+    class CGRect(ctypes.Structure):
+        _fields_ = [("origin", CGPoint), ("size", CGSize)]
+
+    _cg.CGMainDisplayID.restype = ctypes.c_uint32
+    _cg.CGDisplayBounds.restype = CGRect
+    _cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+    _cg.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+    _cg.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, CGPoint, ctypes.c_uint32]
+    _cg.CGEventCreateKeyboardEvent.restype = ctypes.c_void_p
+    _cg.CGEventCreateKeyboardEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_bool]
+    _cg.CGEventKeyboardSetUnicodeString.restype = None
+    _cg.CGEventKeyboardSetUnicodeString.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                                    ctypes.POINTER(ctypes.c_uint16)]
+    _cg.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
+    _cg.CGEventCreateScrollWheelEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                  ctypes.c_uint32, ctypes.c_int32]
+    _cg.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    _cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+    _MOVE, _LDOWN, _LUP, _RDOWN, _RUP = 5, 1, 2, 3, 4
+    _BTN_LEFT, _BTN_RIGHT = 0, 1
+    _HID = 0                      # kCGHIDEventTap
+    _PIXEL_UNITS = 0
+
+    def _mac_screen() -> tuple[int, int]:
+        """主屏尺寸（**点**，不是像素 —— Retina 上两者不同，事件坐标用点）。"""
+        r = _cg.CGDisplayBounds(_cg.CGMainDisplayID())
+        return int(r.size.width), int(r.size.height)
+
+    def _mac_mouse(x: int, y: int, kind: int, button: int = _BTN_LEFT) -> None:
+        ev = _cg.CGEventCreateMouseEvent(None, kind, CGPoint(float(x), float(y)), button)
+        if ev:
+            _cg.CGEventPost(_HID, ev)
+            _cf.CFRelease(ev)
+
+    #: 控制键在 macOS 上的等价字符（用 Unicode 送单字符即可被 App 当成对应按键）。
+    _MAC_KEY_ALIASES = {"Enter": "\r", "Backspace": "\x7f", "Tab": "\t", "Escape": "\x1b"}
+
+    def _mac_key_text(text: str) -> None:
+        """按 **Unicode 字符串**送字（不用键码表）—— 中文、符号都能过。"""
+        for ch in text:
+            code = ord(ch)
+            ev = _cg.CGEventCreateKeyboardEvent(None, 0, True)
+            if not ev:
+                continue
+            buf = (ctypes.c_uint16 * 1)(code)
+            _cg.CGEventKeyboardSetUnicodeString(ev, 1, buf)
+            _cg.CGEventPost(_HID, ev)
+            _cf.CFRelease(ev)
+
+    def _grab_darwin() -> bytes:
+        """抓一帧：系统自带的 screencapture 只能写文件，所以落到临时文件再读回。"""
+        fd, path = tempfile.mkstemp(suffix=".jpg")
+        os.close(fd)
+        try:
+            subprocess.run(["screencapture", "-x", "-t", "jpeg", path],
+                           capture_output=True, timeout=15)
+            with open(path, "rb") as fh:
+                return fh.read()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 # ================================================================ win32 后端
@@ -391,11 +489,12 @@ class Session:
         # 重启服务后显示号会变，会话里的程序就找不回自己的显示了。
         self.number = 100 + (zlib.crc32(sid.encode("utf-8")) % 300)
         # win32 上没有"这一路的显示号"——所有会话看的都是同一块真实桌面。
-        self.display = "真实桌面" if BACKEND == "win32" else f":{self.number}"
+        self.display = ("真实桌面" if BACKEND in REAL_DESKTOP_BACKENDS
+                        else f":{self.number}")
 
     # ------------------------------------------------------------------ 启动
     def ensure(self) -> bool:
-        if BACKEND == "win32":
+        if BACKEND in REAL_DESKTOP_BACKENDS:
             self.started = True                      # 真实桌面，没有要拉起的显示服务器
             return True
         if self.started and self._alive():
@@ -419,7 +518,7 @@ class Session:
         于是"文件在、服务没了"，后续抓帧/注入全部失败（实测踩过：一堆遗留 Xvfb
         造成了难以理解的怪现象）。这里实际连一次确认。
         """
-        if BACKEND == "win32":
+        if BACKEND in REAL_DESKTOP_BACKENDS:
             return True                              # 真实桌面永远"在"
         if BACKEND == "wayland":
             return os.path.exists(os.path.join(self.runtime, "wayland-1"))
@@ -480,7 +579,7 @@ class Session:
     @property
     def env(self) -> dict:
         """在该会话显示上跑程序时应使用的环境。"""
-        if BACKEND == "win32":
+        if BACKEND in REAL_DESKTOP_BACKENDS:
             return dict(os.environ)                  # 真实桌面：原样用当前环境
         if BACKEND == "wayland":
             return {**os.environ, "XDG_RUNTIME_DIR": self.runtime,
@@ -589,6 +688,9 @@ def inject(sess: Session, obj: dict) -> None:
     if BACKEND == "win32":
         _inject_win32(sess, obj)
         return
+    if BACKEND == "darwin":
+        _inject_darwin(sess, obj)
+        return
     kind = obj.get("t")
     x, y = obj.get("x"), obj.get("y")
     if kind in ("click", "move") and x is not None and y is not None:
@@ -641,6 +743,48 @@ def _type_text(sess: Session, text: str) -> None:
         return
     time.sleep(0.4)                                  # 等选区真正建立
     run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+
+
+def _inject_darwin(sess: Session, obj: dict) -> None:
+    """macOS 注入：Quartz CGEvent（纯 ctypes）。
+
+    ⚠️ 与 win32 同理：注入的是**真实**鼠标键盘，所以由 DSH_VIEW_INPUT 控制，
+    **默认关闭**（只读观看）。这段也**没有在真机上验证过**（作者没有 Mac）。
+    """
+    if not MAC_INPUT:
+        return
+    kind = obj.get("t")
+    x, y = obj.get("x"), obj.get("y")
+    try:
+        sw, sh = _mac_screen()
+        if kind in ("click", "move") and x is not None and y is not None:
+            px, py = int(float(x) * sw), int(float(y) * sh)
+            _mac_mouse(px, py, _MOVE)
+            if kind == "click":
+                right = int(obj.get("b") or 1) == 2
+                _mac_mouse(px, py, _RDOWN if right else _LDOWN,
+                           _BTN_RIGHT if right else _BTN_LEFT)
+                time.sleep(0.02)
+                _mac_mouse(px, py, _RUP if right else _LUP,
+                           _BTN_RIGHT if right else _BTN_LEFT)
+        elif kind == "wheel":
+            dy = float(obj.get("dy") or 0)
+            ev = _cg.CGEventCreateScrollWheelEvent(
+                None, _PIXEL_UNITS, 1, int(-dy / 3) or (1 if dy > 0 else -1))
+            if ev:
+                _cg.CGEventPost(_HID, ev)
+                _cf.CFRelease(ev)
+        elif kind == "text":
+            text = str(obj.get("s") or "")
+            if text:
+                time.sleep(0.1)                      # 给焦点一点时间（同 Linux 侧的经验）
+                _mac_key_text(text)
+        elif kind == "key":
+            key = str(obj.get("k") or "")
+            if key:
+                _mac_key_text(_MAC_KEY_ALIASES.get(key, ""))
+    except Exception as exc:                         # noqa: BLE001
+        print(f"[darwin] 注入失败：{type(exc).__name__}: {exc}", flush=True)
 
 
 def _inject_win32(sess: Session, obj: dict) -> None:
@@ -721,6 +865,8 @@ def _inject_wayland(sess: Session, obj: dict) -> None:
 def _grab_once(sess: Session) -> bytes:
     if BACKEND == "win32":
         return win_screen().grab()
+    if BACKEND == "darwin":
+        return _grab_darwin()
     if BACKEND == "wayland":
         cmd = ["grim", "-t", "jpeg", "-q", "80", "-"]
     else:
@@ -913,7 +1059,16 @@ class Handler(BaseHTTPRequestHandler):
             rows = "".join(
                 f'<li><a href="/s/{k}/">{k}</a> · {v.display} '
                 f'{"（就绪）" if v.started else "（未启动）"}</li>' for k, v in items)
-            if BACKEND == "win32":
+            if BACKEND == "darwin":
+                howto = ("<p style='opacity:.65'>本机是 macOS：没有可多开的 headless 显示，"
+                         "darwin 后端抓的是<strong>真实桌面</strong> —— 所有会话看到的是"
+                         "同一块屏。<br>"
+                         "输入注入：" + ("<strong>已开启</strong>（DSH_VIEW_INPUT=1）"
+                                        "，页面上的点击/按键会落在真实桌面上。"
+                                        if MAC_INPUT else "关闭（只读观看；要开设 DSH_VIEW_INPUT=1）")
+                         + "<br><em>darwin 后端尚未在真机验证过，欢迎回报结果。</em></p>")
+                rows = rows + howto
+            elif BACKEND == "win32":
                 howto = ("<p style='opacity:.65'>本机是 Windows：没有 Xvfb 这类可多开的 "
                          "headless 显示，win32 后端抓的是<strong>真实桌面</strong> —— "
                          "所有会话看到的是同一块屏。<br>"
@@ -1066,7 +1221,10 @@ def main() -> None:
     _redirect_log()
     _install_signal_handlers()
     atexit.register(_cleanup_spawned)
-    if BACKEND == "win32":
+    if BACKEND == "darwin":
+        print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 darwin（真实桌面，实验性）· "
+              f"输入注入{'已开启' if MAC_INPUT else '关闭（只读）'}", flush=True)
+    elif BACKEND == "win32":
         print(f"viewer on http://127.0.0.1:{PORT}/ · 后端 win32（真实桌面 {W}x{H}，"
               f"DPI {_DPI_MODE}）· 所有会话共用这块屏 · "
               f"输入注入{'已开启' if WIN_INPUT else '关闭（只读）'}", flush=True)
