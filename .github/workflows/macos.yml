@@ -1,0 +1,87 @@
+name: macOS self-check
+
+# 为什么要有这个：darwin 后端是新增的，而开发机上没有 Mac —— 这里用 GitHub 的
+# 免费 macOS runner 把**能验证的部分**都验掉：ctypes 绑定、后端解析、HTTP 接口、
+# 令牌、页面渲染。真正需要 GUI 会话的部分（截屏权限、向外投递事件）在 CI 上
+# 预期会失败，脚本会把**真实报错**打出来而不是假装通过。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 环境信息
+        run: |
+          sw_vers
+          python -V
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+
+      - name: 静态自检（darwin 分支）
+        run: python service/selfcheck.py
+
+      - name: 检查 CoreGraphics / CoreFoundation 能否加载（ctypes 绑定是最大风险点）
+        run: |
+          python - <<'PY'
+          import ctypes
+          for name in ("CoreGraphics", "CoreFoundation"):
+              lib = ctypes.cdll.LoadLibrary(
+                  f"/System/Library/Frameworks/{name}.framework/{name}")
+              print(f"  ✓ {name} 已加载：{lib}")
+          cg = ctypes.cdll.LoadLibrary(
+              "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+          print("  主屏 id:", cg.CGMainDisplayID())
+          PY
+
+      - name: 启动服务并打接口（含令牌校验）
+        run: |
+          set -x
+          python service/dsh-display-viewer.py > /tmp/viewer.log 2>&1 &
+          sleep 4
+          cat /tmp/viewer.log || true
+          TOKEN=$(cat "$HOME/.cache/dsh-display/token")
+          echo "token 长度: ${#TOKEN}"
+          echo "--- 不带令牌（应 403）---"
+          curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8099/s/ci/state" || true
+          echo "--- 带令牌（应 200）---"
+          curl -s -w "\nHTTP %{http_code}\n" "http://127.0.0.1:8099/s/ci/state?k=$TOKEN" || true
+          echo "--- 索引页 ---"
+          curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8099/?k=$TOKEN" || true
+          echo "--- 页面渲染（应含 darwin 说明）---"
+          curl -s "http://127.0.0.1:8099/s/ci/?k=$TOKEN" | grep -o "darwin[^<]*" | head -3 || true
+
+      - name: 抓帧（CI 无 GUI 会话，预期失败 —— 记录真实报错）
+        run: |
+          python - <<'PY'
+          import importlib.util, socket, sys, urllib.request
+          spec = importlib.util.spec_from_file_location("v", "service/dsh-display-viewer.py")
+          mod = importlib.util.module_from_spec(spec)
+          sys.modules["v"] = mod
+          spec.loader.exec_module(mod)
+          print("  后端:", mod.BACKEND, "| IS_MAC:", mod.IS_MAC)
+          print("  依赖自检:", mod.missing_tools())
+          try:
+              frame = mod._grab_darwin()
+              print(f"  ✓ 抓到 {len(frame)} 字节；文件头 {frame[:2]!r}"
+                  f"（JPEG 应为 b'\\xff\\xd8'）")
+          except Exception as exc:
+              print(f"  ✗ 抓帧失败（CI 上属预期）：{type(exc).__name__}: {exc}")
+          PY
+
+      - name: 汇总
+        if: always()
+        run: |
+          echo "== 结论 =="
+          echo "能在无 GUI 的 CI 上验证：ctypes 绑定 / 后端解析 / 令牌 / HTTP 接口 / 页面渲染"
+          echo "必须在真机验证：屏幕录制权限下的抓帧、辅助功能权限下的按键注入"
