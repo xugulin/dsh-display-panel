@@ -1,5 +1,7 @@
 # dsh-display-panel
 
+[![npm](https://img.shields.io/npm/v/dsh-display-panel.svg)](https://www.npmjs.com/package/dsh-display-panel)
+
 给 **DeepSeek Harness Web UI** 加一个「**显示器**」标签：在「对话 / 轨迹 / 浏览器」旁边，
 实时看到 AI 在**它自己的虚拟显示**上做了什么 —— 而且可以**直接在上面点击、打字**
 （含中文、退格、回车、Ctrl+V），登录、扫码、验证码都能在这个标签里完成。
@@ -30,6 +32,15 @@ Linux（X11 底座）+ 以下命令，缺一个都跑不起来：
 | `xclip` | **中文输入**（走剪贴板 + Ctrl+V） | `xclip` |
 
 ## 安装
+
+### 0) 从 npm 装（最省事）
+
+```sh
+npm i dsh-display-panel
+```
+
+装完仍需按下面第 1 步启动**显示器服务**，再把它登记进 DSH profile 的 `dsh.profile.bundles`。
+
 
 ### 1) 显示器服务（必需）
 
