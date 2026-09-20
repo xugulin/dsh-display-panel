@@ -1,6 +1,7 @@
 # dsh-display-panel
 
 [![npm](https://img.shields.io/npm/v/dsh-display-panel.svg)](https://www.npmjs.com/package/dsh-display-panel)
+[![macOS self-check](https://github.com/xugulin/dsh-display-panel/actions/workflows/macos.yml/badge.svg)](https://github.com/xugulin/dsh-display-panel/actions/workflows/macos.yml)
 
 给 **DeepSeek Harness Web UI** 加一个「**显示器**」标签：在「对话 / 轨迹 / 浏览器」旁边，
 实时看到 AI 在**它自己的虚拟显示**上做了什么 —— 而且可以**直接在上面点击、打字**
@@ -62,9 +63,13 @@ macOS 上也没有可多开的 headless 显示，`darwin` 后端抓的是**本�
 | 注入 | Quartz `CGEvent`（纯 `ctypes`），文字按 **Unicode 字符串**送，中文也能过 |
 | 开关 | 注入默认**关闭**（它动的是真实键鼠）→ 要开设 `DSH_VIEW_INPUT=1` |
 
-> ⚠️ 这一段**没有在真机上跑过**（作者手上没有 Mac）：逻辑按官方文档写，每一步都包了
-> 异常，失败只记日志、不影响其它后端。欢迎 macOS 用户回报结果（`/state` 与
-> `service/selfcheck.py` 的输出就够定位）。
+> **已在 GitHub Actions 的 macOS runner 上验证**（`.github/workflows/macos.yml`，免费额度）：
+> ctypes 绑定（CoreGraphics / CoreFoundation 加载、`CGMainDisplayID()`）✓、
+> 后端解析为 darwin ✓、服务启动 + 令牌校验 + HTTP 接口 ✓、
+> **抓帧成功：63693 字节、文件头 `FF D8`（真 JPEG）** ✓✓。
+>
+> 仍需真机验证的只有一件：**输入注入** —— 它要「辅助功能（Accessibility）」权限，
+> CI 上给不了。要试的话在本机设 `DSH_VIEW_INPUT=1` 后 `/state` 里会显示注入已开启。
 
 ## 多个实例 / 多个用户
 
