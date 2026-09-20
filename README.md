@@ -128,10 +128,17 @@ DISPLAY=:<号> QT_QPA_PLATFORM=xcb 你的程序
 
 ## 自测
 
+两个测试工具都在**控制台仓库**（`dsh-console`）的 `tools/` 下：
+
 ```sh
 python3 service/dsh-display-viewer.py &     # 或走 systemd
-python3 tools/dsh-display-selftest.py       # 12 项：服务/隔离/画面/鼠标/键盘/中文/退格/回车…
+python3 tools/dsh-display-selftest.py       # 自动化：12 项 —— 服务/隔离/画面/鼠标/键盘/中文/退格/回车…
+python3 tools/dsh-display-testcard.py       # 人眼自检卡：8 条色条 / 32 级灰阶 / 时钟 + 秒针
+                                            #   --list 看有哪些会话显示、--browser 换 Chromium 渲染
 ```
+
+自测卡验的是"画面本身对不对"（色通道有没有串、台阶有没有被抹平、是不是实时画面），
+自动化自测验的是"功能通不通" —— 一个给人看，一个给脚本看。
 
 ## 许可
 
