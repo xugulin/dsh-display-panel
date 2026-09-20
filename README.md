@@ -66,7 +66,7 @@ Windows 上**没有可多开的 headless 显示** ✗ —— 所以 `win32` 后�
   `/state` 接口和面板页面上明说 —— 因为缺工具的表现很隐蔽（缺 `xclip` 只是"中文打不进去"、
   缺 `import` 只是"画面一直黑"）。
 
-## macOS（实验性，尚未真机验证）
+## macOS
 
 macOS 上也没有可多开的 headless 显示，`darwin` 后端抓的是**本机真实桌面**
 （所有会话共用那一块屏），实现方式：
@@ -76,6 +76,7 @@ macOS 上也没有可多开的 headless 显示，`darwin` 后端抓的是**本�
 | 抓帧 | 系统自带的 `screencapture -x -t jpeg`（**无需安装任何东西**） |
 | 注入 | Quartz `CGEvent`（纯 `ctypes`），文字按 **Unicode 字符串**送，中文也能过 |
 | 开关 | 注入默认**关闭**（它动的是真实键鼠）→ 要开设 `DSH_VIEW_INPUT=1` |
+| 验证 | 已在 GitHub Actions 的 macOS runner 上跑通（见上方矩阵与 `.github/workflows/macos.yml`）|
 
 > **已在 GitHub Actions 的 macOS runner 上验证**（`.github/workflows/macos.yml`，免费额度）：
 > ctypes 绑定（CoreGraphics / CoreFoundation 加载、`CGMainDisplayID()`）✓、
