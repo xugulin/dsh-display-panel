@@ -1,0 +1,93 @@
+name: Linux self-check
+
+# 为什么要有这个（macOS 那条为什么不够）：
+#   * 这个插件的**主战场是 Linux**：每会话一台 Xvfb、注入走 XTest。darwin 只覆盖抓帧那条路，
+#     而 Linux 这边的东西（依赖自检、xdotool 键名映射、服务脚本、打包内容）在 macOS runner 上
+#     要么跑不到、要么跳过 —— 所以必须有独立的 Linux 作业。
+#   * 这里刻意**只跑不需要人眼的检查**：静态不变式、服务脚本的起停、tools/selftest.py 的
+#     服务级自测、npm 打包清单。浏览器里的面板渲染在 CI 里没有 DSH 实例也没有 Brave，
+#     那部分交给本地 `node tools/e2e-panel.mjs`（缺依赖时它会退 3，不会假装通过）。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 环境信息
+        run: |
+          uname -a
+          python -V
+          node -v
+          echo "runner: $RUNNER_OS $RUNNER_ARCH"
+
+      # 装上依赖之后，selfcheck 里那几条 x11 断言才会从 SKIP 变成真 PASS。
+      # 不装也不会红 —— 缺依赖是 SKIP，不是 FAIL（这正是我们要测的"缺依赖时别崩"）。
+      - name: 装 Linux 侧的显示依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb xdotool xclip imagemagick
+          for c in Xvfb xdotool xclip import; do
+            printf '%-9s %s\n' "$c" "$(command -v $c || echo 缺)"
+          done
+
+      - name: 静态自检（服务内部不变式）
+        run: python3 service/selfcheck.py
+
+      # 服务脚本是"用户视角"的入口：没有 systemd 用户总线的机器上，它就是唯一能起服务的路。
+      # CI runner 里本来就没有可用的用户总线，正好当那条兜底分支的回归测试；
+      # 全程用临时 DSH_DISPLAY_HOME，绝不碰 runner 的 ~/.cache/dsh-display。
+      - name: 服务脚本（非 systemd 兜底分支的起/停/卸载）
+        env:
+          DSH_DISPLAY_HOME: ${{ runner.temp }}/dsh-display
+          DSH_VIEW_SYSTEMD: '0'
+          DSH_VIEW_PORT: '8331'
+          DSH_VIEW_UNIT_DIR: ${{ runner.temp }}/units
+        run: |
+          set -x
+          bash scripts/install-service.sh
+          bash scripts/install-service.sh --status
+          curl -s -o /dev/null -m 3 -w 'GET / -> %{http_code}\n' http://127.0.0.1:8331/
+          test -s "$DSH_DISPLAY_HOME/viewer.pid"      # 兜底模式必须留下 PID 文件
+          bash scripts/install-service.sh --stop
+          bash scripts/uninstall-service.sh --purge
+          test ! -e "$DSH_DISPLAY_HOME"              # --purge 之后不该再有运行目录
+
+      - name: 端到端自测（临时 HOME + 随机端口，自己起服务自己收尸）
+        run: python3 tools/selftest.py
+
+      # 打包清单是"文档与产品一致性"的最后一道闸：README 让用户跑 tools/selftest.py、
+      # 链接 docs/CONTRACT.md、跑 scripts/install-service.sh —— 少打包任何一个，
+      # 用户拿到包就会发现命令不存在。这里逐个断言。
+      - name: 打包内容（README 里出现的命令，包里必须真有）
+        run: |
+          npm pack --dry-run 2>&1 | tee /tmp/pack.txt
+          fail=0
+          for f in README.md cordis.patch.yml docs/CONTRACT.md docs/PACKAGING.md \
+                   lib/index.js lib/client.js lib/tools.js \
+                   scripts/install-service.sh scripts/uninstall-service.sh scripts/service-common.sh \
+                   service/dsh-display-viewer.py service/selfcheck.py \
+                   tools/selftest.py tools/xtarget.py; do
+            grep -q " $f$" /tmp/pack.txt || { echo "✗ 打包里缺 $f"; fail=1; }
+          done
+          grep -q 'service/windows/启动显示器服务.bat' /tmp/pack.txt \
+            || { echo "✗ 打包里缺 Windows 脚本"; fail=1; }
+          exit $fail
+
+      - name: 汇总
+        if: always()
+        run: |
+          echo "== 结论 =="
+          echo "本作业覆盖：静态不变式 / 服务脚本（兜底分支）/ 服务级自测 / 打包清单"
+          echo "不在本作业里：浏览器里的面板渲染（需要真实 DSH 实例 + Brave，交本地 e2e-panel.mjs）"

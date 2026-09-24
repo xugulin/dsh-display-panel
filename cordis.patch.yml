@@ -1,6 +1,45 @@
-# 把"显示器"面板挂进 profile 花名册。宿主半边（exports "."）只是占位，
-# 真正干活的是 Web GUI 侧（package.json 的 dsh.client 声明会让 exports "./client"
-# 在浏览器里加载，它注册一个 conversation.view 槽位）。
+# 把"显示器"面板挂进 profile 花名册。
+#
+# 这个插件是**双半边**的（和官方 dsh-browser-panel 同一套做法）：
+#   * 宿主半边 `exports "."`（lib/index.js）跑在 DSH 宿主进程里：注册
+#     /api/dsh-display-panel/* 同源路由、管显示器服务的生命周期、给 AI 注册 display_panel_* 工具；
+#   * 浏览器半边 `exports "./client"`（lib/client.js）由 package.json 的 `dsh.client`
+#     声明加载，在 Web GUI 里注册一个 `conversation.view` 槽位（就是「显示器」那个标签页）。
+# 下面这条 insert 只是把这一行放进花名册；两半边各自怎么加载由 package.json 决定。
+#
+# id/name 不能随便改：id 是"这一行"的稳定标识（用户按 id 定向覆盖/禁用），
+# name 必须是**包名**（DSH 用它解析 exports）。
 - insert:
     - id: display-panel
       name: 'dsh-display-panel'
+#
+# ── 怎么改配置 ────────────────────────────────────────────────────────────────
+# 本插件的开关**全部走环境变量**（不是 loader 的 `config:` 块），所以覆盖方式是
+# "在 DSH 宿主进程的环境里设变量"，而不是在这里写 config：
+#
+#   DSH_DISPLAY_HOME     令牌/端口/日志/会话映射放哪（默认 ~/.cache/dsh-display）
+#   DSH_VIEW_PORT        起始端口（默认 8099，被占自动顺延）
+#   DSH_VIEW_SIZE        每会话显示的分辨率（默认 1600x1000）
+#   DSH_VIEW_BACKEND     强制 x11 / wayland / win32 / darwin
+#   DSH_VIEW_INPUT=1     win32/darwin 上开启注入（动的是真实键鼠，默认关）
+#   DSH_VIEW_IDLE_MINUTES 空闲回收（默认 30，0=不回收）
+#   DSH_VIEW_MANAGED=0   关掉"宿主在需要时自动拉起服务"
+#   DSH_VIEW_PYTHON      宿主拉起服务用的解释器（默认自动找 python3→python）
+#
+# 设在哪：
+#   * 手工跑 `dsh web` → 就在那个 shell 里 export（或写进启动 DSH 的 systemd 单元的 Environment=）；
+#   * 用 scripts/install-service.sh 装了常驻服务 → 它会把上面这些**写进单元文件的
+#     Environment=**（见 scripts/service-common.sh 的 unit_env_lines）；
+#     宿主那一侧（探测/自动拉起）永远读宿主进程自己的环境。
+# 完整表见 README「环境变量」一节。
+#
+# ── 怎么临时禁用 ──────────────────────────────────────────────────────────────
+# 不要改这个文件（升级会被覆盖），在你自己的 profile patch 层
+# （`$DSH_HOME/profiles/<profile>/cordis.patch.yml`）里按 id 定向禁用：
+#
+#   - id: display-panel
+#     disabled: true
+#
+# 卸载插件本体：`dsh plugin --profile <profile> remove dsh-display-panel`
+# （实测：会同时把包名从 dsh.profile.bundles 里去掉）；
+# 停服务 / 清运行目录：`bash scripts/uninstall-service.sh [--purge]`。

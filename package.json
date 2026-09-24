@@ -1,7 +1,7 @@
 {
   "name": "dsh-display-panel",
-  "version": "0.2.3",
-  "description": "A display tab for the DeepSeek Harness Web UI: watch — and drive — the AI's own headless test display (per-session, isolated, with mouse/keyboard injected back).",
+  "version": "0.3.0",
+  "description": "Display tab for the DeepSeek Harness Web UI: watch and drive the AI's own per-session display. The browser half only talks to the same-origin /api/dsh-display-panel/* proxy (the access token never reaches the browser), and the host half starts the viewer service on demand.",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
@@ -22,21 +22,23 @@
   "files": [
     "README.md",
     "cordis.patch.yml",
+    "docs",
     "lib",
     "scripts",
-    "scripts/publish-npm.sh",
     "service",
-    "service/selfcheck.py",
-    "service/windows"
+    "tools"
   ],
   "keywords": [
     "dsh",
     "deepseek-harness",
     "plugin",
     "display",
+    "panel",
     "vnc",
     "xvfb",
-    "panel"
+    "x11",
+    "screenshot",
+    "agent-tools"
   ],
   "license": "MIT",
   "repository": {
@@ -45,6 +47,9 @@
   },
   "homepage": "https://github.com/xugulin/dsh-display-panel#readme",
   "scripts": {
-    "prepack": "rm -rf service/__pycache__ lib/__pycache__ scripts/__pycache__"
+    "prepack": "rm -rf service/__pycache__ lib/__pycache__ scripts/__pycache__ tools/__pycache__",
+    "selfcheck": "python3 service/selfcheck.py",
+    "test": "python3 tools/selftest.py",
+    "hint": "node scripts/hint.js"
   }
 }

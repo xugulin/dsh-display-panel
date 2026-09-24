@@ -1,9 +1,13 @@
 name: macOS self-check
 
-# 为什么要有这个：darwin 后端是新增的，而开发机上没有 Mac —— 这里用 GitHub 的
-# 免费 macOS runner 把**能验证的部分**都验掉：ctypes 绑定、后端解析、HTTP 接口、
-# 令牌、页面渲染。真正需要 GUI 会话的部分（截屏权限、向外投递事件）在 CI 上
-# 预期会失败，脚本会把**真实报错**打出来而不是假装通过。
+# 为什么要有这个：darwin 后端是本插件里**唯一没法在开发机上验证**的部分（作者没有 Mac）。
+# 这里用 GitHub 的免费 macOS runner 把**能验证的部分**都验掉：
+# ctypes 绑定、后端解析、服务启动、令牌校验、HTTP 接口、抓帧。
+# 真正需要 GUI 会话/系统权限的部分（屏幕录制抓帧、辅助功能下的键鼠注入）在 CI 上
+# 预期会失败 —— 脚本会把**真实报错**打出来并标成"CI 上属预期"，不假装通过。
+#
+# 注意：selfcheck.py 对缺依赖是 **SKIP 而不是 FAIL**（macOS 上本来就没有 Xvfb/xdotool），
+# 所以这里不需要给它喂 Linux 那些依赖。
 
 on:
   push:
@@ -26,10 +30,14 @@ jobs:
         run: |
           sw_vers
           python -V
+          node -v
           echo "runner: $RUNNER_OS $RUNNER_ARCH"
 
       - name: 静态自检（darwin 分支）
         run: python service/selfcheck.py
+
+      - name: 跨平台静态自测（契约关键词 / 打包一致性 / 宿主半边探针）
+        run: python tools/selftest.py --no-dynamic
 
       - name: 检查 CoreGraphics / CoreFoundation 能否加载（ctypes 绑定是最大风险点）
         run: |
@@ -44,27 +52,58 @@ jobs:
           print("  主屏 id:", cg.CGMainDisplayID())
           PY
 
-      - name: 启动服务并打接口（含令牌校验）
+      # 用临时 DSH_DISPLAY_HOME + 非默认端口：不碰 runner 上任何"用户数据"，
+      # 也顺便证明"端口是配置项而不是写死的 8099"。
+      - name: 启动服务并打接口（令牌 403/200、/health、/state）
+        env:
+          DSH_DISPLAY_HOME: ${{ runner.temp }}/dsh-display
+          DSH_VIEW_PORT: '8331'
         run: |
           set -x
-          python service/dsh-display-viewer.py > /tmp/viewer.log 2>&1 &
-          sleep 4
-          cat /tmp/viewer.log || true
-          TOKEN=$(cat "$HOME/.cache/dsh-display/token")
+          python service/dsh-display-viewer.py > "$RUNNER_TEMP/viewer.log" 2>&1 &
+          for i in $(seq 1 20); do
+            [ -f "$DSH_DISPLAY_HOME/port" ] && break
+            sleep 0.5
+          done
+          sleep 2
+          cat "$RUNNER_TEMP/viewer.log" || true
+          PORT=$(cat "$DSH_DISPLAY_HOME/port")      # 端口被占时服务会顺延，以它自报的为准
+          echo "服务端口: $PORT"
+          TOKEN=$(cat "$DSH_DISPLAY_HOME/token")
           echo "token 长度: ${#TOKEN}"
+
           echo "--- 不带令牌（应 403）---"
-          curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8099/s/ci/state" || true
-          echo "--- 带令牌（应 200）---"
-          curl -s -w "\nHTTP %{http_code}\n" "http://127.0.0.1:8099/s/ci/state?k=$TOKEN" || true
-          echo "--- 索引页 ---"
-          curl -s -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8099/?k=$TOKEN" || true
-          echo "--- 页面渲染（应含 darwin 说明）---"
-          curl -s "http://127.0.0.1:8099/s/ci/?k=$TOKEN" | grep -o "darwin[^<]*" | head -3 || true
+          test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/health")" = 403
+
+          echo "--- 带令牌 /health（应 200 且 backend=darwin）---"
+          curl -s "http://127.0.0.1:$PORT/health?k=$TOKEN" | tee "$RUNNER_TEMP/health.json"
+          python - "$RUNNER_TEMP/health.json" <<'PY'
+          import json, sys
+          h = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert h.get("ok") is True, h
+          assert h.get("backend") == "darwin", h
+          assert h.get("service") == "dsh-display-viewer", h
+          assert isinstance(h.get("pid"), int) and h["pid"] > 0, h
+          print("  ✓ /health：ok / backend=darwin / pid 正常")
+          PY
+
+          echo "--- 索引页（应 200）---"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/?k=$TOKEN")" = 200
+
+          echo "--- /state（真实桌面后端，应 backend=darwin 且 realDesktop=true）---"
+          curl -s "http://127.0.0.1:$PORT/s/ci/state?k=$TOKEN" | tee "$RUNNER_TEMP/state.json"
+          python - "$RUNNER_TEMP/state.json" <<'PY'
+          import json, sys
+          s = json.load(open(sys.argv[1], encoding="utf-8"))
+          assert s.get("backend") == "darwin", s
+          print("  ✓ /state：backend=darwin, realDesktop=%s, input=%s"
+                % (s.get("realDesktop"), s.get("input")))
+          PY
 
       - name: 抓帧（CI 无 GUI 会话，预期失败 —— 记录真实报错）
         run: |
           python - <<'PY'
-          import importlib.util, socket, sys, urllib.request
+          import importlib.util, sys
           spec = importlib.util.spec_from_file_location("v", "service/dsh-display-viewer.py")
           mod = importlib.util.module_from_spec(spec)
           sys.modules["v"] = mod
@@ -76,12 +115,12 @@ jobs:
               print(f"  ✓ 抓到 {len(frame)} 字节；文件头 {frame[:2]!r}"
                   f"（JPEG 应为 b'\\xff\\xd8'）")
           except Exception as exc:
-              print(f"  ✗ 抓帧失败（CI 上属预期）：{type(exc).__name__}: {exc}")
+              print(f"  ✗ 抓帧失败（CI 上属预期，真机需屏幕录制权限）：{type(exc).__name__}: {exc}")
           PY
 
       - name: 汇总
         if: always()
         run: |
           echo "== 结论 =="
-          echo "能在无 GUI 的 CI 上验证：ctypes 绑定 / 后端解析 / 令牌 / HTTP 接口 / 页面渲染"
+          echo "能在无 GUI 的 CI 上验证：ctypes 绑定 / 后端解析 / 令牌 / /health / /state / 页面渲染 / 抓帧接口"
           echo "必须在真机验证：屏幕录制权限下的抓帧、辅助功能权限下的按键注入"

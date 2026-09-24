@@ -2,3 +2,8 @@ node_modules/
 __pycache__/
 *.pyc
 *.log
+
+# 本地验证/测试产生的临时状态（不进仓库）
+.verify/
+# 验证截图是本地证据（保留在磁盘上供人查看），但不进版本库：体积大且随代码无关
+verify/shots/
