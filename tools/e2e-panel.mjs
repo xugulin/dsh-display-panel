@@ -19,6 +19,8 @@
  *   --shot-dir DIR     截图与 JSON 报告目录（默认 ./verify/shots）
  *   --timeout MS       单个 UI 步骤超时（默认 30000）
  *   --headless 0       有头运行（排查渲染问题用）
+ *   --frame-outage MS  打开面板时**强制 /frame 回 503** 的窗口（默认 2500，0=关闭）。
+ *                      契约 §3 要求断线退避重连；把"首帧 503"变成确定性回归。
  *   --with-target      额外验证"注入真的落到那台显示上"：经宿主 /exec 拉起
  *                      tools/xtarget.py，再断言点击/打字到达靶程序（需要显示号可写）
  *   --xtarget PATH     靶程序路径（默认 <repo>/tools/xtarget.py）
@@ -52,6 +54,7 @@ const opts = {
   timeout: Number(arg('--timeout', '30000')),
   headless: arg('--headless', '1') !== '0',
   withTarget: flag('--with-target'),
+  frameOutage: Number(arg('--frame-outage', '2500')),
   xtarget: arg('--xtarget', path.join(REPO, 'tools', 'xtarget.py')),
   allowSkip: flag('--allow-skip'),
 }
@@ -197,8 +200,37 @@ try {
   await shot('tabs')
 
   // ------------------------------------------------------------- 3. 打开面板
+  // 先在**点击标签之前**布下"强制 503 窗口"。
+  // 为什么值得常跑：新会话的第一帧本来就可能合法地 503（服务：没有帧就 503），
+  // 而"帧循环被写死"这类缺陷（例如 schedule() 被自己的单飞判断挡掉）表现是
+  // **静默 0 帧、canvas 永远停在 300x150**，页面不报错、服务却一切正常 —— 只有
+  // 这种确定性回归才抓得住。窗口期内每一次 /frame 都必须有重试，窗口结束后必须自动恢复。
+  let blocked503 = 0
+  let allowedAfter = 0
+  const framePattern = '**/api/dsh-display-panel/frame*'
+  const outageUntil = Date.now() + opts.frameOutage
+  if (opts.frameOutage > 0) {
+    await page.route(framePattern, async (route) => {
+      if (Date.now() < outageUntil) {
+        blocked503 += 1
+        await route.fulfill({ status: 503, contentType: 'application/json',
+          body: JSON.stringify({ ok: false, error: 'e2e forced 503 window' }) })
+      } else {
+        allowedAfter += 1
+        await route.continue()
+      }
+    })
+  }
   step('点击「显示器」标签', await clickText('显示器', true))
   await page.waitForTimeout(4000)
+  if (opts.frameOutage > 0) {
+    await page.waitForTimeout(Math.max(0, outageUntil - Date.now()) + 5000)
+    await page.unroute(framePattern)
+    await page.waitForTimeout(4000)
+    step(`强制 503 窗口（${opts.frameOutage}ms）后帧循环自动恢复（契约 §3 退避重连）`,
+      blocked503 >= 2 && allowedAfter >= 3,
+      `窗口期内仍然重试了 ${blocked503} 次；窗口结束后放行 ${allowedAfter} 次`)
+  }
 
   const canvasCount = await page.locator('canvas').count()
   const iframeCount = await page.locator('iframe').count()

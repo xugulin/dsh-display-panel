@@ -324,8 +324,8 @@ node scripts/hint.js                       # 更轻的一份：只看运行目�
 ```sh
 python3 service/selfcheck.py     # 服务内部不变式（后端解析、键名映射、页面模板、依赖自检）
                                  # 缺 Xvfb/xdotool/xclip/imagemagick 时相关项 SKIP 而不是 FAIL —— CI 无 GUI 也能跑
-python3 tools/selftest.py        # 端到端自测：临时 HOME + 随机高端口，自己起服务、自己收尸
-                                 # 覆盖 /health 无副作用、sid 校验、注入、顺序、隔离…
+python3 tools/selftest.py        # 端到端自测：临时 HOME + 临时 DSH_DISPLAY_HOME + 自动端口，
+                                 # 自己起服务、自己收尸；覆盖 /health 无副作用、sid 校验、注入顺序、会话隔离…
 ```
 
 `tools/selftest.py` 的输出长这样（数字随版本/环境不同；**跳过不算失败**）：
@@ -337,26 +337,54 @@ python3 tools/selftest.py        # 端到端自测：临时 HOME + 随机高端�
 ```
 
 失败时会把**现场数据**一起打出来（哪一条、期望什么、实际什么），例如
-`失败：A 会话的注入不落到 B 会话（画面互不污染） — B 日志行数 1 → 2`，
-而不是只说一句 FAIL。
+`失败：非法 sid 没被挡住  — /s/..%2f..%2fetc/state 返回 200`，而不是只说一句 FAIL。
 
-退出码 **0 = 没有 FAIL（跳过不算失败）**，非 0 = 有 FAIL。常用参数：
-`--no-dynamic`（只跑静态检查）、`--port N`、`--home DIR`、`--keep`（保留临时目录）、`-v`。
+退出码 **0 = 没有 FAIL（跳过不算失败）**，1 = 有 FAIL。常用参数：
+`--viewer <路径>`、`--port N`（0 = 自动挑空闲高位端口）、`--home DIR`、`--timeout S`、
+`--no-dynamic`（只跑静态检查，CI 友好）、`--keep`（保留临时目录便于排查）、`-v`。
 
-浏览器里的真·端到端（需要先有一个在跑的 DSH Web UI + Playwright + Brave）：
+两点免得误会：
+
+* 它开头会打印**被测文件的 sha256 与 git HEAD** —— 那是定位用的，不是报错；
+* 本机**同时跑着别的显示器服务**时，会看到一条
+  `SKIP 零副作用：没有碰用户真实 ~/.cache/dsh-display — 检测到外部服务正在使用该 home(pid=…)，归因不明，跳过`
+  —— 这是**故意跳过**（避免把"自测碰了你的数据"误判成真），不是红。
+
+CI 里就这么写（不用加"无 GUI"开关：缺 Xvfb/xdotool/import/xclip 时动态段会整体 SKIP 且退出 0）：
+
+```sh
+python3 service/selfcheck.py && python3 tools/selftest.py
+```
+
+浏览器里的真·端到端（需要先有一个在跑的 DSH Web UI —— 例如隔离实例上 `dsh web`；再加 Playwright + Brave）：
 
 ```sh
 # --url 用 `dsh web` 启动日志里那行带 ?token= 的地址
-node tools/e2e-panel.mjs --url 'http://127.0.0.1:<DSH端口>/?token=<…>' --shot-dir /tmp/shots
+node tools/e2e-panel.mjs --url 'http://127.0.0.1:<DSH端口>/?token=<…>'
+# 可选：--shot-dir DIR（默认 verify/shots）、--timeout MS、--headless 0、--with-target、--allow-skip
 ```
 
 它自己**不**起 DSH 实例；缺 Playwright/Brave 时会明文报 `SKIP(缺依赖)` 并**退出码 3**
-（不是 0 —— 免得 CI 里静默变绿），加 `--allow-skip` 才退 0。
+（不是 0 —— 免得 CI 里静默变绿），加 `--allow-skip` 才退 0；退出码 0 = 全过、1 = 有失败。
+产物在 `--shot-dir`（默认 `verify/shots/`）里：截图 + `e2e-report.json`
+（含 `/frame` 请求时间线，排查"面板空白"特别有用）；依赖位置可用
+`DSH_E2E_PLAYWRIGHT` / `DSH_E2E_BROWSER` 覆盖。**CI 里不跑它**（runner 上没有 DSH 实例也没有 Brave），
+它是本地/手工验证用的。
 
-> 本轮状态（如实）：`tools/selftest.py` 与 `tools/e2e-panel.mjs` 都已随包落地，本机的服务级
-> 自测跑出过 `62 通过 / 1 失败 / 1 跳过`，唯一失败是
-> 「A 会话的注入不落到 B 会话（画面互不污染） — B 日志行数 1 → 2」，已交给 service-dev/verify-dev 定位；
-> **最终结论以 `verify/REPORT.md` 为准**。CI 只跑不需要 GUI 的部分，见
+还有一个 `tools/xtarget.py`：给自动化用的 X11 靶程序（纯标准库 + ctypes，不用 gcc），
+把收到的鼠标/按键按 `READY/BUTTON/MOTION/KEY/PASTE…` 写进日志，便于断言落点与顺序。
+它需要一块 X 显示 —— 最简单是经服务自己的 `exec` 在会话显示上跑：
+
+```sh
+curl -s -X POST "http://127.0.0.1:<服务端口>/s/<sid>/exec?k=<token>" -H 'content-type: application/json' \
+     -d '{"argv":["python3","tools/xtarget.py","/tmp/xt.log","--label","demo"],"wait":false}'
+```
+
+> 本轮状态（如实）：`tools/selftest.py` 与 `tools/e2e-panel.mjs` 都已随包落地并跑通 ——
+> verify-dev 实测 selftest 全绿（`== 63 通过 / 0 失败 / 1 跳过（共 64 项）==`，
+> `--no-dynamic` 时 `== 30 通过 / 0 失败 / 2 跳过 ==`）、`e2e-panel.mjs` **17 通过 / 0 失败**；
+> 我在服务端新接口落地**之前**跑过一次，当时有一条「A 会话的注入不落到 B 会话（画面互不污染）」失败，
+> 以最终验证为准，详见 `verify/REPORT.md`。CI 只跑不需要 GUI 的部分，见
 > [`.github/workflows/linux.yml`](.github/workflows/linux.yml) 与 [`macos.yml`](.github/workflows/macos.yml)。
 
 ## 实现要点（踩过的坑都在这）

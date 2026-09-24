@@ -61,9 +61,17 @@
 * 显示号：先看 ``<HOME>/displays.json`` 里该 sid 的持久映射（**同一 sid 重启服务后仍拿同一号**），
   再在 100..399 里探测**空闲**号并用 ``<HOME>/locks/X<n>.lock``（内容=sid）原子占用
   —— 旧实现是 ``100 + crc32(sid) % 300``，两个会话撞号时会共用一台显示（隔离失效）。
+* **归属校验（ownership proof）**：光"这个号有人应答"是不够的 —— X11 的 abstract socket
+  （``@/tmp/.X11-unix/X<n>``）属于**网络命名空间**，而 ``/tmp`` 是各命名空间私有的，
+  所以别的沙箱/别的实例遗留的 Xvfb 可能占着同一个号：它能应答，却是**别人的画面**。
+  因此我们在自己的 X 服务器 root window 上打标记 ``DSH_DISPLAY_SESSION=<sid>``，
+  "可用" = 有人应答 **且** （我们自己拉起的 Xvfb 进程还活着 **或** 标记等于本会话 sid）。
+  标记不匹配/缺失 → 视为**不可用** → 换号重试（并把它当成"死号"，绝不静默复用别人的屏幕）。
 * 空闲回收：``DSH_VIEW_IDLE_MINUTES``（默认 30，**0=不回收**）分钟没有请求就回收会话、
   停掉它的 Xvfb；``/health``、``/``、``/state`` 这类探测**永远不会**创建会话。
 * 进程退出（SIGTERM/SIGINT/atexit）会把自己拉起的显示服务器与 /exec 子进程一并收掉。
+  失败原因（例如 ``Server is already active for display N``）会写进日志与
+  ``/state`` 的 ``startError``，不再只有一句"Xvfb 没起来"。
 
 ## Windows（win32 后端）
 
@@ -280,6 +288,10 @@ def _scan_missing() -> list:
     for name, why, pkg in REQUIRED_TOOLS.get(BACKEND, ()):
         if shutil.which(name) is None:
             missing.append({"tool": name, "why": why, "package": pkg})
+    if BACKEND == "x11" and _x11() is None:
+        # 没 libX11 就打不了归属标记 → 跨重启认领退化为"绝不认领"（保守但安全）。
+        missing.append({"tool": "libX11.so.6", "why": "显示归属标记（防止复用到别人的显示）",
+                        "package": "libx11-6 / libX11"})
     return missing
 
 
@@ -859,12 +871,144 @@ def _xserver_displays() -> set:
     return found
 
 
-def _display_available(number: int, sid: str, busy=frozenset(), mapped: bool = False) -> bool:
-    """号是否可用：不是别人的锁、也不是真在跑的 X 服务器。
+#: 我们在**自己的** X 服务器 root window 上打的归属标记（属性名）。
+#: 分辨"这台显示到底是不是本会话的"靠它 —— 光看"有没有人应答"是不够的，
+#: 见 Session._owns_display 的说明。
+OWNER_PROP = "DSH_DISPLAY_SESSION"
 
-    ``mapped=True`` 表示"持久映射说这个号原本就是本会话的"：这时残留的 socket 文件
-    （Xvfb 被杀后没清干净）不算占用 —— 让 Xvfb 自己去清理，否则服务重启后
-    同一 sid 就拿不回同一个号了。
+#: XGetWindowProperty 的 AnyPropertyType。
+_X11_ANY_TYPE = 0
+_x11_lib = None                                      # None=未加载；False=加载失败
+_x11_lock = threading.Lock()
+
+
+def _x11():
+    """懒加载 libX11（ctypes）—— 归属标记用它，**不用 xprop**。
+
+    为什么不用 ``xprop -root -set``：实测本机（xprop 1.2 系）它**返回 0 却什么
+    都没写进去**，属性读回来永远是 ``not found`` —— 拿它做归属标记等于没做。
+    自己调 XChangeProperty/XGetWindowProperty 反而更短、更可控，也少一个依赖。
+    另外这里**必须**逐一声明 argtypes：64 位下不声明会被按 int 截断成野指针
+    （实测直接段错误）。
+    """
+    global _x11_lib
+    with _x11_lock:
+        if _x11_lib is not None:
+            return _x11_lib or None
+        try:
+            lib = ctypes.CDLL("libX11.so.6")
+            lib.XOpenDisplay.restype = ctypes.c_void_p
+            lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            lib.XCloseDisplay.restype = ctypes.c_int
+            lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            lib.XDefaultRootWindow.restype = ctypes.c_ulong
+            lib.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+            lib.XInternAtom.restype = ctypes.c_ulong
+            lib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            lib.XChangeProperty.restype = ctypes.c_int
+            lib.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                                            ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                                            ctypes.c_char_p, ctypes.c_int]
+            lib.XGetWindowProperty.restype = ctypes.c_int
+            lib.XGetWindowProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_long, ctypes.c_long,
+                ctypes.c_int, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_void_p)]
+            lib.XSync.restype = ctypes.c_int
+            lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XFree.restype = ctypes.c_int
+            lib.XFree.argtypes = [ctypes.c_void_p]
+            _x11_lib = lib
+        except Exception as exc:                     # noqa: BLE001
+            print(f"⚠ 加载 libX11 失败（显示归属校验会退化）：{type(exc).__name__}: {exc}",
+                  flush=True)
+            _x11_lib = False
+        return _x11_lib or None
+
+
+def _with_x11(display: str, fn):
+    """在 ``display`` 上做一次 X 调用（打开→调用→关闭，全程串行化）。
+
+    连不上、或 libX11 不可用 → 返回 None。
+    """
+    lib = _x11()
+    if not lib:
+        return None
+    with _x11_lock:
+        dpy = lib.XOpenDisplay(str(display).encode("utf-8"))
+        if not dpy:
+            return None
+        try:
+            return fn(lib, dpy, lib.XDefaultRootWindow(dpy))
+        except Exception:                            # noqa: BLE001
+            return None
+        finally:
+            lib.XCloseDisplay(dpy)
+
+
+def display_owner(display: str):
+    """读 root window 上的归属标记。
+
+    返回 sid 字符串；``""`` 表示**属性不存在**（即不是我们打的标记 = 别人的显示）；
+    ``None`` 表示根本问不到（连不上这个显示、或 libX11 不可用）。
+    """
+    def read(lib, dpy, root):
+        prop = lib.XInternAtom(dpy, OWNER_PROP.encode(), True)   # only_if_exists
+        if not prop:
+            return ""
+        actual_type = ctypes.c_ulong()
+        actual_format = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        bytes_after = ctypes.c_ulong()
+        data = ctypes.c_void_p()
+        status = lib.XGetWindowProperty(
+            dpy, root, prop, 0, 1024, False, _X11_ANY_TYPE,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after), ctypes.byref(data))
+        if status != 0:
+            return None
+        try:
+            if not data or not nitems.value:
+                return ""
+            raw = ctypes.string_at(data, nitems.value)
+        finally:
+            if data:
+                lib.XFree(data)
+        return raw.decode("utf-8", "replace").strip("\x00")
+
+    return _with_x11(display, read)
+
+
+def mark_display_owner(display: str, sid: str) -> bool:
+    """在我们自己的 X 服务器上打归属标记（root window 的 ``DSH_DISPLAY_SESSION``）。
+
+    标记打在 **X 服务器**里，所以即使本服务被 ``kill -9``、Xvfb 变成孤儿进程，
+    重启后的服务仍然能认出"这台显示是本会话的"，从而安全复用它（同号）。
+    """
+    def write(lib, dpy, root):
+        prop = lib.XInternAtom(dpy, OWNER_PROP.encode(), False)
+        string = lib.XInternAtom(dpy, b"STRING", False)
+        if not prop or not string:
+            return False
+        value = str(sid).encode("utf-8")
+        lib.XChangeProperty(dpy, root, prop, string, 8, 0, value, len(value))
+        lib.XSync(dpy, False)
+        return True
+
+    return bool(_with_x11(display, write))
+
+
+def _display_available(number: int, sid: str, busy=frozenset(), mapped: bool = False,
+                       owner_check=None) -> bool:
+    """号是否可用：不是别人的锁、也不是**别人的** X 服务器在跑。
+
+    ``mapped=True`` 表示"持久映射说这个号原本就是本会话的"：
+    * 残留的 socket 文件（Xvfb 被杀后没清干净）不算占用 —— 让 Xvfb 自己去清理，
+      否则服务重启后同一 sid 就拿不回同一个号了；
+    * 如果这个号上真有一台 X 服务器在跑，还要用 ``owner_check``（读 root 上的
+      归属标记）确认那是**我们自己的孤儿 Xvfb** —— 是的话就认领复用（同号）。
+      光看"在跑"就复用会让别的命名空间/别人的显示被当成自己的（串扰）。
     """
     lock = _lock_path(number)
     if os.path.exists(lock):
@@ -875,7 +1019,9 @@ def _display_available(number: int, sid: str, busy=frozenset(), mapped: bool = F
             return False                             # 别人的锁
         # 空锁文件 = 上次崩了留下的：继续按占用情况判断
     if number in busy:
-        return False                                 # 真有 X 服务器跑着这个号
+        if not mapped or owner_check is None:
+            return False                             # 真有 X 服务器跑着这个号
+        return bool(owner_check(number))             # 只有"标记对得上"才认领
     return mapped or not _socket_in_use(number)
 
 
@@ -914,6 +1060,17 @@ def candidate_display(sid: str) -> int:
     return DISPLAY_BASE + (zlib.crc32(sid.encode("utf-8")) % DISPLAY_SPAN)
 
 
+def mark_owner_check(sid: str):
+    """给 :func:`claim_display` 用的归属回调：这个号上的 X 服务器是不是本会话的。
+
+    判据就是 root window 上的归属标记（没有标记、或标记是别的 sid → 不是我们的）。
+    """
+    def check(number: int) -> bool:
+        owner = display_owner(f":{number}")
+        return owner is not None and owner == sid
+    return check
+
+
 def claim_display(sid: str, exclude=()) -> int:
     """给会话要一个**独占**的显示号；同一 sid 重启服务后仍拿到同一号。"""
     with _display_lock:
@@ -921,7 +1078,8 @@ def claim_display(sid: str, exclude=()) -> int:
         busy = _xserver_displays()
         current = mapping.get(sid)
         if (current is not None and current not in exclude
-                and _display_available(current, sid, busy, mapped=True)
+                and _display_available(current, sid, busy, mapped=True,
+                                       owner_check=mark_owner_check(sid))
                 and _claim_lock(current, sid)):
             return current
         start = candidate_display(sid)
@@ -1012,6 +1170,10 @@ def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:
 class Session:
     """一个 harness 会话独占的显示（X11 默认；wayland / win32 / darwin 为备用后端）。"""
 
+    #: 显示"活着且属于我们"的探测结果缓存时长（秒）。
+    #: 探测要起一个 xdotool 进程，而 ensure() 在每个输入事件上都会被调用。
+    _ALIVE_TTL = 2.0
+
     def __init__(self, sid: str) -> None:
         self.sid = sid
         self.dir = os.path.join(HOME_DIR, "sessions", sid)
@@ -1026,6 +1188,13 @@ class Session:
         self._server_proc = None
         self.created = time.time()
         self.last_used = self.created
+        # 显示归属/可用性的探测缓存（见 _alive / _owns_display）。
+        self._alive_ok = False
+        self._alive_at = 0.0
+        self.start_error = None
+        self.owner_marked = None
+        #: 换过号的话记下原来的号（诊断用：说明那个号被别人占了）。
+        self.relocated_from = None
         # 抓帧可见性：失败不再静默（旧实现 except: pass，全黑时谁也看不出原因）。
         self.frame_error = None
         self.frame_count = 0
@@ -1075,8 +1244,12 @@ class Session:
             _ensure_dir(self.dir)
             _ensure_dir(self.runtime)
             ok = self._start_wayland() if BACKEND == "wayland" else self._start_xvfb()
-            if not ok and BACKEND == "x11" and self.relocate():
-                ok = self._start_xvfb()              # 换了号再试一次
+            # 起不来最常见的原因就是"这个显示号被别的命名空间的 X 服务器占着"：
+            # 换号重试几次（每次失败的原因都会写进 self.start_error 与日志）。
+            for _attempt in range(3):
+                if ok or BACKEND != "x11" or not self.relocate():
+                    break
+                ok = self._start_xvfb()
             self.started = ok
             return ok
 
@@ -1099,35 +1272,98 @@ class Session:
             return False
         print(f"[{self.sid}] 显示号 {old} 起不来（可能被别的命名空间占了），改用 :{new}",
               flush=True)
+        self.relocated_from = old
         self.number = new
         self.display = f":{new}"
         return True
 
-    def _alive(self) -> bool:
-        """显示是否真的可用。
-
-        ⚠️ X11 下**不能只看 socket 文件是否存在**：进程被杀后 socket 文件会残留，
-        于是"文件在、服务没了"，后续抓帧/注入全部失败（实测踩过：一堆遗留 Xvfb
-        造成了难以理解的怪现象）。这里实际连一次确认。
-        """
-        if BACKEND in REAL_DESKTOP_BACKENDS:
-            return True                              # 真实桌面永远"在"
-        if BACKEND == "wayland":
-            return os.path.exists(os.path.join(self.runtime, "wayland-1"))
-        if not _socket_in_use(self.number):
-            return False
+    def _display_answers(self) -> bool:
+        """这个显示号上**有人应答**吗（不区分是谁）。"""
         if shutil.which("xdotool") is None:
-            return True                              # 没 xdotool 时只能相信 socket
+            return display_owner(self.display) is not None
         try:
-            proc = subprocess.run(["xdotool", "getdisplaygeometry"],
-                                  env={**os.environ, "DISPLAY": self.display,
-                                       "WAYLAND_DISPLAY": ""},
+            proc = subprocess.run(["xdotool", "getdisplaygeometry"], env=self.env,
                                   capture_output=True, timeout=6)
             return proc.returncode == 0 and bool(proc.stdout.strip())
         except Exception:                            # noqa: BLE001
             return False
 
+    def _alive_probe(self) -> bool:
+        """真实探测：这个号上有人应答，**并且那台 X 服务器是我们的**。
+
+        ⚠️ 三条都必须查：
+
+        1. 不能只看 socket 文件 —— 进程被杀后 socket 会残留（"文件在、服务没了"）。
+        2. 更不能只看"有人应答" —— X11 的 abstract socket（``@/tmp/.X11-unix/X<n>``）
+           属于**网络命名空间**，而 ``/tmp`` 是各命名空间私有的：别的沙箱/别的实例
+           遗留的 Xvfb 可能占着同一个号。它**能应答**，但那是**别人的画面** ——
+           当成自己的用就退回到最初被投诉的"串扰"；反过来，等它退出后我们又记着
+           这个号，``/exec`` 里的程序就报 ``cannot open display``。
+           （实测：同名号的 Xvfb 在共享网络命名空间里**起不来** ——
+           ``Cannot establish any listening sockets``，所以"我们自己的 Xvfb 活着"
+           就意味着两个 socket 都是我们的。）
+        3. 归属证明见 :meth:`_owns_display`：要么我们自己的 Xvfb 进程活着，
+           要么 root window 上带着本会话的标记。跨命名空间认领（服务重启后
+           Xvfb 变成孤儿、socket 文件留在旧命名空间的 ``/tmp`` 里）正是靠标记。
+        """
+        if BACKEND in REAL_DESKTOP_BACKENDS:
+            return True                              # 真实桌面永远"在"
+        if BACKEND == "wayland":
+            return os.path.exists(os.path.join(self.runtime, "wayland-1"))
+        if not self._display_answers():
+            return False
+        if _socket_in_use(self.number) or peek_display(self.sid) == self.number:
+            return self._owns_display()
+        return False                                 # 号上有东西应答，但跟本会话无关
+
+    def _owns_display(self) -> bool:
+        """归属校验：这个号上的 X 服务器是不是本会话的。
+
+        判据（满足其一即可）：
+
+        * 我们**自己拉起**的 Xvfb 进程还活着（``self._server_proc``）；
+        * 它的 root window 上带着我们打的标记 ``DSH_DISPLAY_SESSION=<sid>``
+          （服务被 kill -9、Xvfb 变成孤儿之后，重启的服务靠这条还能认出自己的显示）。
+
+        两条都不成立 → **不算我们的**：宁可换号，也不静默复用到别人的画面上。
+        """
+        proc = self._server_proc
+        if proc is not None and proc.poll() is None:
+            return True
+        owner = display_owner(self.display)
+        if owner is None:                            # 问不到（连不上 / libX11 不可用）
+            return False
+        return owner == self.sid
+
+    def _alive(self) -> bool:
+        """带短缓存的 :meth:`_alive_probe`。
+
+        缓存是为了性能：``ensure()`` 在每个输入事件、每次 ``/state``、``/snapshot``
+        上都会被调用，而探测要起一个 ``xdotool`` 进程（+ 一次 X 调用）。
+        """
+        now = time.time()
+        if self._alive_ok and (now - self._alive_at) < self._ALIVE_TTL:
+            return True
+        ok = self._alive_probe()
+        self._alive_at = now
+        self._alive_ok = ok
+        return ok
+
+    def _startup_error(self, log_path: str) -> str:
+        """从启动日志里挑出真正的原因（例如 "Server is already active for display N"）。"""
+        try:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
+                lines = [ln.strip() for ln in fh.read().splitlines() if ln.strip()]
+        except OSError:
+            return ""
+        keys = ("already active", "fatal", "error", "failed", "cannot", "no such")
+        hits = [ln for ln in lines if any(k in ln.lower() for k in keys)]
+        chosen = hits[-1] if hits else (lines[-1] if lines else "")
+        return chosen[:300]
+
     def _start_xvfb(self) -> bool:
+        # ⚠️ 这里的 _alive() 现在带**归属校验**：别人的显示不会被当成我们的
+        #    （旧实现直接 `if self._alive(): return True` = 静默复用别人的画面）。
         if self._alive():
             return True
         log = os.path.join(self.dir, "xvfb.log")
@@ -1141,7 +1377,8 @@ class Session:
                 stdout=logfh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except Exception as exc:                     # noqa: BLE001
-            print(f"[{self.sid}] Xvfb 启动失败：{exc}", flush=True)
+            self.start_error = f"Xvfb 启动失败：{type(exc).__name__}: {exc}"
+            print(f"[{self.sid}] {self.start_error}", flush=True)
             return False
         finally:
             if logfh not in (subprocess.DEVNULL, None):
@@ -1151,18 +1388,38 @@ class Session:
                     pass
         self._server_proc = proc
         _register_spawn(proc)
+        ok = False
         for _ in range(25):
             time.sleep(0.2)
             if self._alive():
-                print(f"[{self.sid}] 显示就绪 {self.display}（{W}x{H}）", flush=True)
-                return True
+                ok = True
+                break
             if proc.poll() is not None:              # 已经死了，不必再等
                 break
+        if ok:
+            if self.relocated_from is None:
+                self.start_error = None              # 原地起来了，没有要报的启动故障
+            self._alive_ok = True
+            self._alive_at = time.time()
+            # 打归属标记：这样即使服务被 kill -9、Xvfb 变成孤儿，重启后也认得出。
+            self.owner_marked = mark_display_owner(self.display, self.sid)
+            if not self.owner_marked:
+                print(f"[{self.sid}] ⚠ 归属标记写入失败（{OWNER_PROP}）：跨重启认领会退化为"
+                      f"换号（不会复用到别人的显示）", flush=True)
+            print(f"[{self.sid}] 显示就绪 {self.display}（{W}x{H}）", flush=True)
+            return True
         # 失败：**不要**把死进程留在 _spawned（旧实现就是那样泄漏的）。
         _unregister_spawn(proc)
         self._server_proc = None
+        self._alive_ok = False
         _terminate_proc(proc, timeout=1.0)
-        print(f"[{self.sid}] Xvfb 没起来，看 {log}", flush=True)
+        detail = self._startup_error(log)
+        self.start_error = (f"显示 {self.display} 起不来：{detail}" if detail
+                            else f"显示 {self.display} 起不来（看 {log}）")
+        if self._display_answers():
+            # 号上有人应答却不是我们的：这正是"别的命名空间/别的实例占着同一个号"。
+            self.start_error += "；该显示号上有别的 X 服务器在应答（不是本会话的）"
+        print(f"[{self.sid}] {self.start_error}", flush=True)
         return False
 
     def _start_wayland(self) -> bool:
@@ -1186,7 +1443,10 @@ class Session:
             if self._alive():
                 print(f"[{self.sid}] 显示就绪（Wayland）", flush=True)
                 return True
-        print(f"[{self.sid}] 合成器没起来，看 {self.dir}/sway.log", flush=True)
+        detail = self._startup_error(os.path.join(self.dir, "sway.log"))
+        self.start_error = (f"合成器（sway）起不来：{detail}" if detail
+                            else f"合成器（sway）起不来（看 {self.dir}/sway.log）")
+        print(f"[{self.sid}] {self.start_error}", flush=True)
         return False
 
     def stop(self, release: bool = False, forget: bool = False) -> None:
@@ -1209,6 +1469,8 @@ class Session:
             _terminate_proc(proc, timeout=3.0)
             self._server_proc = None
         self.started = False
+        self._alive_ok = False
+        self._alive_at = 0.0
         if release:
             release_display(self.sid, self.number, forget=forget)
 
@@ -1780,12 +2042,14 @@ def window_count(sess: Session) -> int:
         return -1
 
 
-def _tooltip(started: bool, count: int, idle: bool, frame_error) -> str:
+def _tooltip(started: bool, count: int, idle: bool, frame_error, start_error=None) -> str:
     if real_desktop():
         if not input_enabled():
             return "真实桌面 · 只读观看（未开启输入注入）"
         return "真实桌面 · 点击/按键会落在本机真实桌面上"
     if not started:
+        if start_error:
+            return f"显示器起不来：{start_error}"
         return "显示器尚未启动（调用 /display 或 /snapshot 会拉起）"
     if frame_error:
         return f"抓不到画面：{frame_error}"
@@ -1825,6 +2089,9 @@ def _session_state(sid: str, sess) -> dict:
             "tooltip": _tooltip(False, -1, False, None),
             "frame": {"ok": False, "error": None, "count": 0, "lastAt": 0},
             "frameError": None,
+            "ownDisplay": False,
+            "ownerMarked": None,
+            "startError": None,
         })
         return base
     started = sess.ensure()
@@ -1841,10 +2108,17 @@ def _session_state(sid: str, sess) -> dict:
         "cursor": cursor_pos(sess) if started else None,
         "started": bool(started),
         "claimed": claimed,
-        "tooltip": _tooltip(bool(started), count, count == 0, frame_error),
+        "tooltip": _tooltip(bool(started), count, count == 0, frame_error,
+                            sess.start_error),
         "frame": {"ok": frame_ok, "error": frame_error,
                   "count": frame_count, "lastAt": round(last_frame_at, 3)},
         "frameError": frame_error,
+        # 归属/启动诊断：显示号是不是真被别的 X 服务器占了、我们有没有打上标记，
+        # 全在这里能看到（旧实现只有一句"Xvfb 没起来"）。
+        "ownDisplay": bool(sess._owns_display()) if started else False,
+        "ownerMarked": sess.owner_marked,
+        "startError": sess.start_error,
+        "relocatedFrom": sess.relocated_from,
         "inputCount": sess.input_count,
         "inputError": sess.last_input_error,
         "queue": sess.queue_size(),

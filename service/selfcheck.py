@@ -159,7 +159,8 @@ def interface_checks(mod) -> None:
         check("未创建会话的 /state 返回 200 且 started=false",
               status == 200 and data.get("started") is False, f"HTTP {status} {data.get('started')}")
         need = ("session", "display", "backend", "size", "windows", "idle", "cursor",
-                "missing", "input", "realDesktop", "tooltip")
+                "missing", "input", "realDesktop", "tooltip",
+                "startError", "ownDisplay", "ownerMarked")
         check("/state 含契约要求的字段（cursor/input/realDesktop/tooltip…）",
               not [k for k in need if k not in data],
               "缺: " + str([k for k in need if k not in data]))
@@ -312,6 +313,45 @@ def main() -> int:
           and mod.DISPLAY_BASE == 100, mod.candidate_display("abc"))
     check("抓帧失败可见（frame_error 会进 /state）",
           "frame_error" in source and "frameError" in source, "")
+
+    # ---- 通用：显示归属校验（防止"复用到别人的显示"）
+    # 为什么单列一组：X11 的 abstract socket 属于网络命名空间、而 /tmp 是各命名空间私有的，
+    # 别的沙箱遗留的 Xvfb 可能占着同一个号并**能应答** —— 只按"有人应答"判断可用，
+    # 就会把别人的画面当成自己的（串扰），或者等它退出后留下死号。
+    check("归属标记的属性名与两个辅助函数都在",
+          mod.OWNER_PROP == "DSH_DISPLAY_SESSION"
+          and callable(getattr(mod, "display_owner", None))
+          and callable(getattr(mod, "mark_display_owner", None)), mod.OWNER_PROP)
+    check("归属标记走 libX11（ctypes），不用 xprop",
+          "libX11.so.6" in source and "XChangeProperty" in source,
+          "实测 xprop -root -set 返回 0 却什么都没写进去")
+    check("Session 带归属校验、探测缓存与换号重试",
+          all(hasattr(mod.Session, name) for name in
+              ("_owns_display", "_display_answers", "_alive_probe", "_alive",
+               "_startup_error", "relocate"))
+          and mod.Session._ALIVE_TTL > 0
+          and "for _attempt in range(3)" in source, mod.Session._ALIVE_TTL)
+    check("启动失败原因可从日志里提取（already active / listening sockets）",
+          "listening sockets" in source and "start_error" in source, "")
+    saved_x11 = mod._x11
+    try:
+        mod._x11 = lambda: None                        # 假装加载不到 libX11
+        check("拿不到 libX11 时归属校验宁可不认（不可用 → 换号），也不静默复用",
+              mod.display_owner(":1") is None
+              and mod.mark_display_owner(":1", "s") is False)
+    finally:
+        mod._x11 = saved_x11
+    try:
+        # 建一个 Session 只会占用显示号，**不会**启动 Xvfb（也不会起抓帧线程）。
+        probe = mod.Session("selfcheck-owner")
+        check("没真正拉起 Xvfb 时不认领归属",
+              probe._owns_display() is False and probe.started is False, "")
+        check("Session 带 start_error/owner_marked/relocated_from 字段（/state 里看得到）",
+              all(hasattr(probe, name) for name in
+                  ("start_error", "owner_marked", "relocated_from")), "")
+        mod.release_display(probe.sid, probe.number, forget=True)
+    except Exception as exc:                             # noqa: BLE001
+        check("Session 归属相关的自检", False, f"{type(exc).__name__}: {exc}")
 
     # ---- 通用：页面模板（转义 + 占位符）
     try:

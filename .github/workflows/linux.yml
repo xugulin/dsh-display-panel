@@ -19,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出代码
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: 装 Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -64,7 +66,13 @@ jobs:
           bash scripts/uninstall-service.sh --purge
           test ! -e "$DSH_DISPLAY_HOME"              # --purge 之后不该再有运行目录
 
-      - name: 端到端自测（临时 HOME + 随机端口，自己起服务自己收尸）
+      # 这一个作业里既跑静态段也跑动态段（runner 上已经装了 Xvfb/xdotool/xclip/imagemagick）。
+      # 说明两点，免得看日志时误会：
+      #   * 它不是"能 import 就算过"：静态段含 py_compile / node --check / 契约关键词 /
+      #     宿主半边探针（真跑 lib/index.js，断言 /info 响应体里没有令牌）；
+      #   * 它开头会打印被测文件的 sha256 与 git HEAD（定位用），以及外部的 SKIP 行 —— 都不是报错。
+      # 缺依赖的机器上动态段会整体 SKIP 并返回 0，所以这个作业不会因为"CI 没有 GUI"而红。
+      - name: 端到端自测（临时 HOME + 临时 DSH_DISPLAY_HOME + 自动端口，自己起服务自己收尸）
         run: python3 tools/selftest.py
 
       # 打包清单是"文档与产品一致性"的最后一道闸：README 让用户跑 tools/selftest.py、

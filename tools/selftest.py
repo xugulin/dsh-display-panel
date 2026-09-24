@@ -377,6 +377,7 @@ class Viewer:
         self.viewer = viewer
         self.proc: subprocess.Popen | None = None
         self.xtarget_procs: list[subprocess.Popen] = []
+        self.created_sids: set[str] = set()
         self.exec_ok = False
 
     # ---------------------------------------------------------------- 生命周期
@@ -428,6 +429,12 @@ class Viewer:
         return "\n".join(chunks)
 
     def stop(self) -> None:
+        # 先让服务把自己的会话收干净（停 Xvfb、杀 /exec 子进程）—— 不留孤儿显示
+        for sid in sorted(self.created_sids):
+            try:
+                self.close_session(sid)
+            except Exception:                                 # noqa: BLE001
+                pass
         for proc in self.xtarget_procs:
             try:
                 proc.terminate()
@@ -468,9 +475,67 @@ class Viewer:
         status, head, raw = self.req("GET", f"/s/{sid}/snapshot")
         return status, head, raw, time.time() - t0
 
+    # ---------------------------------------------------------------- 会话清理
+    def close_session(self, sid: str) -> None:
+        """把这个会话收干净（停 Xvfb、杀 /exec 子进程）—— 不留孤儿。"""
+        self.created_sids.discard(sid)
+        for method in ("POST", "DELETE"):
+            try:
+                status, _h, _raw = self.req(method, f"/s/{sid}/close")
+                if status < 400:
+                    return
+            except Exception:                                 # noqa: BLE001
+                pass
+        try:                                                  # 老版本没有 /close：退化成 /kill
+            status, _h, raw = self.req("GET", f"/s/{sid}/procs")
+            for item in ((as_json(raw) or {}).get("procs") or []):
+                if isinstance(item, dict) and item.get("pid"):
+                    self.req("POST", f"/s/{sid}/kill", body={"pid": item["pid"]})
+        except Exception:                                     # noqa: BLE001
+            pass
+
+    def session_diagnostics(self, sid: str) -> str:
+        """失败时必须能定位：/state（frameError/started）+ xvfb.log 尾部。"""
+        bits = []
+        try:
+            status, _h, raw = self.req("GET", f"/s/{sid}/state", timeout=10)
+            bits.append(f"/state HTTP {status}: {raw[:400].decode('utf-8', 'replace')}")
+        except Exception as exc:                              # noqa: BLE001
+            bits.append(f"/state 取不到：{type(exc).__name__}: {exc}")
+        for path in (self.home / "dsh-display" / "sessions" / sid / "xvfb.log",):
+            try:
+                if path.exists():
+                    bits.append(f"{path.name} 尾部：{path.read_text(errors='replace')[-300:]}")
+            except OSError:
+                pass
+        return " | ".join(bits)
+
     # ---------------------------------------------------------------- 靶程序
-    def start_target(self, sid: str, label: str, timeout: float = 120) -> Path:
+    def start_target(self, sid: str, label: str, timeout: float = 120) -> tuple[str, Path]:
+        """起靶程序；**失败重试一次换新会话**（避开"显示号被别的 X 服务器占着"的死局）。
+
+        为什么必须重试：跨沙箱/命名空间遗留的 Xvfb 扫不到、lock 也在对方私有 /tmp 里，
+        服务可能挑到别人占着的显示号 → 自己的 Xvfb 立刻 "Server is already active" 退出，
+        靶程序随后 cannot open display。这类失败**换一个会话（=换一个显示号）就好了**。
+        """
+        problems = []
+        for candidate in (sid, f"{sid}-r2"):
+            try:
+                logpath = self._spawn_target(candidate, label, timeout)
+            except SkipCheck:
+                raise
+            text = self.wait_log(candidate, logpath, "READY", timeout=20)
+            if "READY" in text and "ERROR" not in text:
+                return candidate, logpath
+            problems.append(f"[{candidate}] {text.strip().splitlines()[-1] if text.strip() else '（空日志）'}")
+            self.close_session(candidate)
+            time.sleep(1.0)
+        raise RuntimeError("靶程序起不来（试了两次，可能是显示号被别的 X 服务器占着）："
+                           + " / ".join(problems) + " || " + self.session_diagnostics(sid))
+
+    def _spawn_target(self, sid: str, label: str, timeout: float) -> Path:
         """优先走契约的 /exec（服务进程命名空间里拉起）；没有 /exec 就本机降级。"""
+        self.created_sids.add(sid)
         logpath = self.home / "logs" / f"{sid}.log"
         logpath.parent.mkdir(parents=True, exist_ok=True)
         argv = [sys.executable, str(XTARGET), str(logpath), "--label", label,
@@ -653,15 +718,18 @@ def dynamic_checks(viewer: Viewer) -> None:
         record("/exec wait:false 返回 pid 与 display", PASS if p2.get("display") else FAIL,
                str(p2)[:120])
 
-    # D8 起靶程序
+    # D8 起靶程序（失败会自动换一个会话重试一次 —— 显示号可能被别人占着）
     try:
-        log_a = viewer.start_target(sid_a, "SESSION-A")
+        sid_a, log_a = viewer.start_target(sid_a, "SESSION-A")
     except SkipCheck as exc:
         skip("靶程序可启动（注入断言的前置）", str(exc))
         return
+    except Exception as exc:                                  # noqa: BLE001
+        record("靶程序可启动（注入断言的前置）", FAIL, f"{exc}"[:500])
+        return
     text = viewer.wait_log(sid_a, log_a, "READY", timeout=15)
     if not ok("靶程序可启动（注入断言的前置）", "READY" in text,
-              "mode=" + ("exec" if viewer.exec_ok else "direct-fallback")
+              f"sid={sid_a} mode=" + ("exec" if viewer.exec_ok else "direct-fallback")
               + f" | 日志尾部：{text[-160:]!r}"):
         return
     if "ERROR" in text:
@@ -856,7 +924,7 @@ def dynamic_checks(viewer: Viewer) -> None:
     record("两个会话拿到不同显示号", bool(disp_a) and bool(disp_b) and disp_a != disp_b,
            f"{disp_a} vs {disp_b}")
     try:
-        log_b = viewer.start_target(sid_b, "SESSION-B")
+        sid_b, log_b = viewer.start_target(sid_b, "SESSION-B")
         text_b = viewer.wait_log(sid_b, log_b, "READY", timeout=15)
         if "READY" in text_b:
             # 基线要等 B 的靶程序自己那两行（READY/FOCUS）写完再取，且只数**可注入事件**行
