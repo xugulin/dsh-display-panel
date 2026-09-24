@@ -191,7 +191,7 @@ README/文档必须按"两种都行、推荐 exec"来写（已通知 docs-dev �
 | P0-1 面板 iframe 直连另一个端口（HTTPS 混合内容 / 远程访问 / 反代全废） | 面板改走**同源代理** `lib/client.js` 只用 `/api/dsh-display-panel/*`；宿主 `lib/index.js` 转发 | 源码里 `127.0.0.1`/`localhost`/`?k=`/`<iframe>` 命中数=0（selftest 静态断言）；浏览器 e2e：`canvas=1 iframe=0` |
 | P0-2 令牌进浏览器 | 令牌只在宿主侧拼上游 URL；`/info` 不含令牌 | 对全部响应体 grep 令牌 → 0 命中（host-dev 实测）；selftest 有"`/info` 响应体不含令牌"断言 |
 | P0-3 探测接口有副作用（打 `/state` 会顺手拉 Xvfb）+ 探测成功后永不再试 | 新增无副作用的 `/health` 作唯一探测入口；宿主侧探测+缓存；客户端指数退避自愈 | `接口冒烟全程没有创建会话、没有拉起显示服务器 — sessions=0 spawned=0`；selftest「/health 前后 sessions 不变」；客户端 503 后 588ms 自动恢复并续拉 57 帧 |
-| P0-4 显示号 `crc32%300` 会撞号 → 两会话共用一台显示 | `displays.json` 持久映射 + `locks/X<n>.lock` 原子占用 + 扫 `/proc`；**再加 root window 归属标记**（见 §6.3） | selftest「两个会话拿到不同显示号 :296 vs :342」「同 sid 重启后同号」；selfcheck 4 条归属校验断言 |
+| P0-4 显示号 `crc32%300` 会撞号 → 两会话共用一台显示 | `displays.json` 持久映射 + `locks/X<n>.lock` 原子占用 + 扫 `/proc`；**再加 root window 归属标记**（见 §6.2） | selftest「两个会话拿到不同显示号 :296 vs :342」「同 sid 重启后同号」；selfcheck 5 条归属校验断言（73/74 PASS）；`e2e-ownership.sh` 26/26（含「外来 X 服务器占号 → 不认领、自动换号、无串扰」） |
 | P0-5（已勘误）沙箱里怎么把程序放到那台显示上 | 保留 `DISPLAY=:N`（实测可用，见 §6.1）+ 新增 `POST /s/<sid>/exec`（+`/procs`/`/kill`）作为更稳路径；宿主给 AI 的 `display_panel_run` 走它 | selftest「跨进程 DISPLAY=:300 可用」「/exec wait:true 回显 DISPLAY/QT_QPA_PLATFORM/WAYLAND_DISPLAY」「/procs 能看到 /exec 拉起的靶程序」 |
 | P0-6 服务要用户手工常驻、缺任何诊断 | 宿主按需自动拉起（`DSH_VIEW_MANAGED`）；`/info` 给端口/版本/pid/缺依赖/日志路径；客户端状态条显示后端/fps/缺依赖/真实桌面警告 | host-dev 实测：服务未起 `running=false` → `POST /service{start}` → `running=true(pid,version 0.3.0,legacy=false)` → `/frame` 出真 JPEG；面板冷启动路径在两种 e2e 里都验证 |
 
@@ -232,3 +232,29 @@ setsid 兜底 + **拒绝覆盖别人的同名单元**（本机真有一个同名
 * **macOS**：仅 CI 静态断言；输入注入需要真机「辅助功能」权限；
 * **wayland 后端**：仍不可用（缺 seatd/vptr），已降级为明确报错；
 * **真实系统输入法**（本机只模拟了 composition 事件）、**HTTPS 同源部署**、**dpr>1 屏**。
+
+### 6.2 加固时挖出来的两个真问题：显示归属、以及 Xvfb 的 `-noreset`
+
+修 P0-4（撞号串台）时，我们把「这个号有人应答」升级成「**必须是我们的**」，过程中撞出两件事：
+
+1. **`/proc` 与 lock 文件都不足以判断一个显示号是否被占**
+   X11 客户端优先连 **abstract socket**（属于网络命名空间）。别的 PID 命名空间里的 X 服务器：
+   `/proc` 扫不到、它的 `/tmp/.X<n>-lock` 在它自己的私有 tmpfs 里也看不到，
+   但**它能应答**。于是旧逻辑会把别人的屏当成「我们的显示已就绪」→ 静默复用（隔离失效），
+   或者对方退出后我们记下一个死号（靶程序报 `cannot open display`）。
+   现在：Xvfb 起来后在 root window 写 `DSH_DISPLAY_SESSION=<sid>`，
+   `_alive()` 必须「有人应答 **且** 归属对得上」，否则视为不可用并**换号重试**（最多 3 次）；
+   `/state` 暴露 `ownDisplay / ownerMarked / startError / relocatedFrom` 供排查。
+
+2. **`Xvfb` 不加 `-noreset` 会在最后一个客户端断开时复位服务器**
+   后果有两个，都很像「玄学」：① 我们打在 root 上的归属标记当场消失（这正是标记第一版验不过的根因）；
+   ② **帧缓冲被清空** —— 用户看到「程序明明还在跑，画面却突然全黑」。加 `-noreset` 后两者都消失。
+
+附带两个环境陷阱（都已写进代码注释）：
+* `xprop -root -set` 在本机（xprop 1.2 系）**返回 0 却什么也没写**（第三方 `xprop -root` 读永远 not found）
+  → 标记改用 libX11 ctypes 的 `XChangeProperty`，顺带少一个外部命令依赖；
+* ctypes 调 Xlib **必须逐一声明 `argtypes`**，否则 64 位下指针被截断 → 直接段错误。
+
+证据：`.verify/service/ownership-evidence.txt`；`bash .verify/service/e2e-ownership.sh` → **26 PASS / 0 FAIL**
+（嵌套沙箱里的外来 `:352` 被正确拒绝并换号到 `:353`、外来屏上有哨兵窗口时我们会话 `windows=0`、
+第三方 `xprop` 能读回我们的标记、`kill -9` 后重启**同号同 pid** 认回孤儿 Xvfb）。
