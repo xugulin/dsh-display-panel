@@ -44,7 +44,7 @@ cat /tmp/xt.log      # → BUTTON x=400 y=300 button=1 / KEY keysym=h text="h" /
 | 工具 | 状态 | 实测证据 |
 |---|---|---|
 | `tools/xtarget.py` | ✅ 可用 | Xvfb + xdotool 实跑：`BUTTON x=400 y=300 button=1`、`KEY keysym=h text="h"`、`KEY keysym=BackSpace text="\b"`、`KEY keysym=Return text="\n"`、`PASTE text="中文测试 ok"`（Ctrl+V 走 XConvertSelection 读 CLIPBOARD/UTF8_STRING）、`BUTTON ... button=5`（滚轮） |
-| `tools/selftest.py` | ✅ 63 通过 / 0 失败 / 1 跳过 | 见 §2 输出 |
+| `tools/selftest.py` | ✅ 63 通过 / 0 失败 / 1 跳过（退出码 0） | 见 §2 输出（最终版 a680c04 上复跑一致） |
 | `tools/e2e-panel.mjs` | ✅ 18 通过 / 0 失败 | 见 §5 输出（含强制 503 窗口回归） |
 
 `xtarget.py` 的两个实现要点（踩过）：
@@ -57,9 +57,12 @@ cat /tmp/xt.log      # → BUTTON x=400 y=300 button=1 / KEY keysym=h text="h" /
 
 ```
 $ python3 tools/selftest.py
-  service/dsh-display-viewer.py  sha256:93a3b1d0928884eb  mtime:1790268887
+  service/dsh-display-viewer.py  sha256:b0bfc969ee701f7e  mtime:1790269609
+  service/selfcheck.py           sha256:a422b99a8a07b421  mtime:1790269617
   lib/client.js                  sha256:66644e53cd724fb0  mtime:1790269040
-  git HEAD 590c13a（工作区有未提交改动）
+  lib/index.js                   sha256:1458b1b86f7fb4ff  mtime:1790268955
+  tools/xtarget.py               sha256:92652c8331e63084  mtime:1790266595
+  git HEAD a680c04（工作区有未提交改动）
 ---- 静态检查 ----
 PASS  py_compile dsh-display-viewer.py / selfcheck.py / xtarget.py / selftest.py
 PASS  service/selfcheck.py 全部通过  — == 8/8 项通过 ==

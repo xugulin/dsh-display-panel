@@ -1373,7 +1373,13 @@ class Session:
             logfh = subprocess.DEVNULL
         try:
             proc = subprocess.Popen(
-                ["Xvfb", self.display, "-screen", "0", f"{W}x{H}x24", "-nolisten", "tcp"],
+                # ⚠️ ``-noreset`` 必须加：X 服务器在**最后一个客户端断开时会把整个服务器
+                # 复位**（销毁 root window 及其全部属性、重跑 xkbcomp）。实测后果：
+                # ① 我们打在 root 上的归属标记在"没有客户端连着"的瞬间就没了
+                #    （这正是这套归属校验一开始验证不通过的原因）；
+                # ② 靶程序一退出，画面就被复位清空 —— 用户看到的是"莫名其妙全黑"。
+                ["Xvfb", self.display, "-screen", "0", f"{W}x{H}x24",
+                 "-nolisten", "tcp", "-noreset"],
                 stdout=logfh, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 start_new_session=True)
         except Exception as exc:                     # noqa: BLE001
