@@ -174,3 +174,61 @@ Failed creating new xdo instance    # ← 加网络隔离后才失败（同一�
 
 所以 `exec` 的定位从"修复断掉的链路"降级为"更稳、更可诊断的推荐路径"，
 README/文档必须按"两种都行、推荐 exec"来写（已通知 docs-dev 与 service-dev）。
+
+---
+
+## 7. 修复对照表（问题 → 改在哪 → 怎么证明）
+
+> 本节是 §1–§3 那张清单的"结账单"：每条 P0/P1/P2 都对应到具体文件与**可复现的验证**。
+> 复现方式统一在两处：`python3 service/selfcheck.py`（静态+接口层，72/73 PASS + 1 SKIP）、
+> `python3 tools/selftest.py`（动态，63 PASS / 0 FAIL / 1 SKIP）、
+> `node tools/e2e-panel.mjs --url "<带 token 的 DSH URL>"`（真浏览器，17 PASS / 0 FAIL）。
+
+### P0（致命）
+
+| 问题 | 修复 | 验证 |
+|---|---|---|
+| P0-1 面板 iframe 直连另一个端口（HTTPS 混合内容 / 远程访问 / 反代全废） | 面板改走**同源代理** `lib/client.js` 只用 `/api/dsh-display-panel/*`；宿主 `lib/index.js` 转发 | 源码里 `127.0.0.1`/`localhost`/`?k=`/`<iframe>` 命中数=0（selftest 静态断言）；浏览器 e2e：`canvas=1 iframe=0` |
+| P0-2 令牌进浏览器 | 令牌只在宿主侧拼上游 URL；`/info` 不含令牌 | 对全部响应体 grep 令牌 → 0 命中（host-dev 实测）；selftest 有"`/info` 响应体不含令牌"断言 |
+| P0-3 探测接口有副作用（打 `/state` 会顺手拉 Xvfb）+ 探测成功后永不再试 | 新增无副作用的 `/health` 作唯一探测入口；宿主侧探测+缓存；客户端指数退避自愈 | `接口冒烟全程没有创建会话、没有拉起显示服务器 — sessions=0 spawned=0`；selftest「/health 前后 sessions 不变」；客户端 503 后 588ms 自动恢复并续拉 57 帧 |
+| P0-4 显示号 `crc32%300` 会撞号 → 两会话共用一台显示 | `displays.json` 持久映射 + `locks/X<n>.lock` 原子占用 + 扫 `/proc`；**再加 root window 归属标记**（见 §6.3） | selftest「两个会话拿到不同显示号 :296 vs :342」「同 sid 重启后同号」；selfcheck 4 条归属校验断言 |
+| P0-5（已勘误）沙箱里怎么把程序放到那台显示上 | 保留 `DISPLAY=:N`（实测可用，见 §6.1）+ 新增 `POST /s/<sid>/exec`（+`/procs`/`/kill`）作为更稳路径；宿主给 AI 的 `display_panel_run` 走它 | selftest「跨进程 DISPLAY=:300 可用」「/exec wait:true 回显 DISPLAY/QT_QPA_PLATFORM/WAYLAND_DISPLAY」「/procs 能看到 /exec 拉起的靶程序」 |
+| P0-6 服务要用户手工常驻、缺任何诊断 | 宿主按需自动拉起（`DSH_VIEW_MANAGED`）；`/info` 给端口/版本/pid/缺依赖/日志路径；客户端状态条显示后端/fps/缺依赖/真实桌面警告 | host-dev 实测：服务未起 `running=false` → `POST /service{start}` → `running=true(pid,version 0.3.0,legacy=false)` → `/frame` 出真 JPEG；面板冷启动路径在两种 e2e 里都验证 |
+
+### P1（严重）
+
+| 问题 | 修复 | 验证 |
+|---|---|---|
+| P1-1 输入乱序（每事件一线程） | 每会话单 worker + `queue.Queue` 串行 | selftest「20 个连续字符顺序不乱」；selfcheck 断言 |
+| P1-2 没有拖拽/抬起 | 新增 `down`/`up`，客户端按住时发 move | selftest「down→move→up 都到达且顺序正确」；客户端 e2e「双击=2 down/2 up」 |
+| P1-3 win32 滚轮反方向 | 统一 DOM 语义（dy>0=下滚）再映射各后端 | selftest「dy=+120→按钮5 / dy=-120→按钮4」；win32 侧仅单元断言（无 Windows 机器） |
+| P1-4 `/snapshot` 最长阻塞 5 秒 | 没帧立即 503 | selftest「snapshot 不阻塞 — 0.26s / 0.016s」 |
+| P1-5 `/stream` 断连刷栈 | 断连检测 + 异常隔离 | 代码审查 + 服务不再打栈（日志无 BrokenPipe） |
+| P1-6 会话/Xvfb/Popen 永不回收 | 空闲回收（`DSH_VIEW_IDLE_MINUTES` 默认 30）+ `DELETE /s/<sid>`/`close` + 退出清理 + 死进程不入 `_spawned` | selftest「空闲回收后 sessions=0 且 Xvfb 也没了」；selfcheck「退出清理」 |
+| P1-7 抓帧失败静默 | `/state.frameError` + 抓帧失败日志 + 退避 | selftest 在失败注入下能读到 `frameError` |
+| P1-8 抓帧进程开销 | 拉帧节奏与抓帧间隔解耦、无会话不抓帧 | `/state.frame` 统计（count/lastAt） |
+| P1-9 独立页面 XSS | `html_escape` + `js_str` 双转义 | selfcheck 断言（含 `"><script>` 类 sid） |
+| P1-10 会话 id 路径穿越 | 白名单 `^[A-Za-z0-9._-]{1,64}$`（另拒 `.`/`..`）→ 400 | selfcheck + selftest：`../x`/`../../etc/passwd`/65 字符/缺失 全 400 |
+| P1-11 令牌 `==` 比较 | `hmac.compare_digest` | 代码审查 + selfcheck 断言 |
+| P1-12 HTTP/1.0、响应头不全 | `HTTP/1.1` + 全 `no-store` + handler 异常隔离 | selfcheck 断言（HTTP 版本、no-store） |
+| P1-13 darwin/win32 文案把真实桌面写成"独立显示" | 按 `realDesktop` 分文案 | selfcheck 断言；面板状态条也会警告 |
+| P1-14 win32 空闲计数/DPI | 保留并改进（仅静态断言） | **未在 Windows 上验证** |
+| P1-15 文本注入健壮性 | 剪贴板路径（`xclip -l`）+ 有焦点余量 | selftest「中文经剪贴板真粘进目标程序 `PASTE len=15 text=中文显示器`」 |
+| P1-16 写死中文、无构建标记 | zh/en + `BUILD` 常量 + 状态条 | 客户端 e2e（zh/en 文案断言） |
+
+### P2（一般）
+
+`tools/selftest.py`+`tools/xtarget.py`+`tools/e2e-panel.mjs` 进仓库（README 承诺的自测工具终于存在）；
+新增 Linux CI（`linux.yml`）并修正 macOS CI；README 全重写（平台矩阵明示未验证项、故障排查、
+接口表、DISPLAY vs exec 的正确说法）；`scripts/hint.js` 从死脚手架改成真的状态检查；
+`package.json` files 去重 + `test/selfcheck/hint` 脚本；`install-service.sh` 加 systemd 主路径 +
+setsid 兜底 + **拒绝覆盖别人的同名单元**（本机真有一个同名单元指向控制台仓库）+ 新增 uninstall；
+会话目录/token/displays.json 权限收到 700/600；注入失败不再回 `{"ok":true}`；
+面板补状态条/光标准星/缺依赖提示/重连退避。
+
+### 明确**没有**验证的部分（不要当成已验证）
+
+* **Windows**：`win32` 后端、`service/windows/*.bat|vbs`、滚轮方向修复、idle 计数 —— 本轮无 Windows 机器；
+* **macOS**：仅 CI 静态断言；输入注入需要真机「辅助功能」权限；
+* **wayland 后端**：仍不可用（缺 seatd/vptr），已降级为明确报错；
+* **真实系统输入法**（本机只模拟了 composition 事件）、**HTTPS 同源部署**、**dpr>1 屏**。
