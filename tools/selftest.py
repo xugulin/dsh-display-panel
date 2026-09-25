@@ -191,6 +191,16 @@ def static_checks() -> None:
     if CONTRACT.exists() and (ROOT / "package.json").exists():
         try:
             pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+            # 0.4.2 回归钉子：path 自带查询串时，令牌必须用 & 拼（否则 `?quality=90?k=…`
+            # 会让服务端把令牌当成前一个参数的值 → 403 → 截图工具写出假 JPEG）
+            tools_src = (ROOT / "lib" / "tools.js").read_text(encoding="utf-8")
+            record("tools.js：路径自带 ? 时用 & 拼令牌",
+                   "path.includes('?') ? '&' : '?'" in tools_src,
+                   "callService 的查询串拼接")
+            record("tools.js：截图前校验 JPEG magic（不把错误响应写成 .jpg）",
+                   "返回的不是 JPEG" in tools_src and "isJpeg" in tools_src,
+                   "display_panel_screenshot 的响应校验")
+
             m = re.search(r"接口契约（v([0-9.]+)", CONTRACT.read_text(encoding="utf-8"))
             cver = m.group(1) if m else "?"
             pver = str(pkg.get("version"))
