@@ -1084,6 +1084,61 @@ def zero_side_effect_check(before: dict, after: dict, own_pids: set[int],
            f"属主 pid={owner or '无'}）")
 
 
+def slow_dns_guard() -> None:
+    """回归钉子：``socket.getfqdn()`` 慢的时候，服务必须**照样及时写出端口文件**。
+
+    为什么专门测这个：``http.server.HTTPServer.server_bind()`` 会做一次反向 DNS
+    (``socket.getfqdn``)。在没有反向解析的环境（GitHub Actions 的 macOS runner、
+    部分容器）这一步会卡十几秒 —— 端口已经绑好、``<home>/port`` 却迟迟不写，
+    于是宿主/CI/安装脚本全都判定"服务没起来"。0.3.0 的 macOS CI 就是这么红的
+    （实测把 getfqdn 拖慢 20 秒，15 秒内都不出现 port 文件）。
+    """
+    print("\n---- 回归钉子：慢 DNS 下端口文件仍要及时写出 ----")
+    guard_dir = Path(TMPDIR) / "slowdns"
+    home = guard_dir / "home"
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    (guard_dir / "sitecustomize.py").write_text(
+        "import socket, time\n"
+        "_orig = socket.getfqdn\n"
+        "def slow(name=''):\n"
+        "    time.sleep(20)\n"
+        "    return _orig(name)\n"
+        "socket.getfqdn = slow\n",
+        encoding="utf-8")
+    port = free_port()
+    env = {**os.environ, "PYTHONPATH": str(guard_dir), "DSH_DISPLAY_HOME": str(home),
+           "DSH_VIEW_PORT": str(port)}
+    env.pop("DSH_VIEW_LOG", None)
+    proc = subprocess.Popen([sys.executable, str(VIEWER)], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        port_file = home / "port"
+        deadline = time.time() + 6.0
+        seen = None
+        while time.time() < deadline:
+            if port_file.exists() and port_file.read_text(encoding="utf-8").strip():
+                seen = time.time()
+                break
+            time.sleep(0.1)
+        if seen is None:
+            record("慢 DNS 下 <home>/port 仍及时写出", FAIL,
+                   "等 6 秒仍没有 port 文件 —— server_bind 里大概又走了 socket.getfqdn()")
+        else:
+            record("慢 DNS 下 <home>/port 仍及时写出", PASS,
+                   f"端口文件 = {port_file.read_text(encoding='utf-8').strip()}")
+        if port_file.exists():
+            bound = port_file.read_text(encoding="utf-8").strip()
+            code, _hdrs, raw = http_req(int(bound), "GET", "/health")
+            record("慢 DNS 下拉起的服务仍能应答 /health",
+                   code == 403 and b"token" in raw, f"HTTP {code} {raw[:100].decode('utf-8', 'replace')}")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:                                     # noqa: BLE001
+            proc.kill()
+
+
 def main(argv: list[str]) -> int:
     global TMPDIR, VERBOSE
     ap = argparse.ArgumentParser(description="dsh-display-panel 自检")
@@ -1126,6 +1181,7 @@ def main(argv: list[str]) -> int:
     viewer = Viewer(args.port or free_port(), Path(TMPDIR) / "viewer-home", Path(args.viewer))
     try:
         static_checks()
+        slow_dns_guard()
         host_probe(Path(TMPDIR))
         ready, why = has_all_tools()
         if args.no_dynamic:

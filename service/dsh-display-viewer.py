@@ -108,6 +108,7 @@ import select
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -2877,24 +2878,49 @@ def _redirect_log() -> None:
         pass
 
 
+class ViewerServer(ThreadingHTTPServer):
+    """HTTP 服务本体：**唯一区别是 bind 时不反查域名**。
+
+    ``http.server.HTTPServer.server_bind()`` 会调用 ``socket.getfqdn(host)`` 做反向解析。
+    在没有反向 DNS 的环境（GitHub Actions 的 macOS runner、部分容器/隔离网络）这一步会
+    卡十几秒甚至更久 —— 后果是**端口已经绑好、端口文件却迟迟不写**，
+    于是宿主/CI 脚本/``scripts/install-service.sh`` 全都以为"服务没起来"
+    （实测：把 ``socket.getfqdn`` 人为拖慢 20 秒，``<home>/port`` 15 秒内都不出现；
+    macOS CI 就是这么红的）。
+
+    这里改成只做真正的 bind/listen，``server_name`` 直接用绑定地址填 ——
+    我们从不依赖 FQDN，少一次可能挂死的系统调用。
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)     # 只 bind + listen，不碰 DNS
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
+
 def _bind(preferred: int, tries: int = 12) -> "ThreadingHTTPServer":
     """从 preferred 开始找一个能绑的端口，并把最终端口写进 ``<HOME_DIR>/port``。
 
     为什么：同一台机器上可能有多个实例（多个用户、或手工起了两次）。原来的行为是
     端口被占就**直接崩** —— 用户只会看到"面板连不上"，完全看不出原因。
     现在自动往后找，插件侧则在 8099..8111 范围内探测第一个应答的服务。
+
+    为什么用 :class:`ViewerServer` 而不是 ``ThreadingHTTPServer``：见前者的注释
+    （``server_bind`` 里的 FQDN 反查会拖到端口文件写不出来）。
     """
     last = None
     for port in range(preferred, preferred + tries):
         try:
-            srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            srv = ViewerServer(("127.0.0.1", port), Handler)
         except OSError as exc:                       # 端口被占：换下一个
             last = exc
             continue
         global PORT
         PORT = port
-        srv.daemon_threads = True
-        srv.allow_reuse_address = True
         _ensure_dir(HOME_DIR)
         try:
             with open(os.path.join(HOME_DIR, "port"), "w", encoding="utf-8") as fh:

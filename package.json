@@ -1,6 +1,6 @@
 {
   "name": "dsh-display-panel",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Display tab for the DeepSeek Harness Web UI: watch and drive the AI's own per-session display. The browser half only talks to the same-origin /api/dsh-display-panel/* proxy (the access token never reaches the browser), and the host half starts the viewer service on demand.",
   "main": "lib/index.js",
   "exports": {
