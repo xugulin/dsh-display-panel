@@ -1,0 +1,405 @@
+{
+  "tool": "tools/perf-panel.mjs",
+  "label": "final-0.4.0-cap30",
+  "startedAt": "2026-09-25T05:34:14.445Z",
+  "options": {
+    "url": null,
+    "serviceOnly": true,
+    "baselineService": false,
+    "viewer": null,
+    "port": 8513,
+    "home": "/home/xgl/python/DSH插件/.verify/final-display",
+    "attach": false,
+    "session": "perf1",
+    "seconds": 20,
+    "animFps": 20,
+    "label": "final-0.4.0-cap30",
+    "shots": "/home/xgl/python/DSH插件/dsh-display-panel/verify/shots-perf",
+    "json": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/final-0.4.0-cap30.json",
+    "phases": [
+      "fps"
+    ],
+    "adversarial": false,
+    "adversarialOnly": false,
+    "streamFps": 30,
+    "keep": false,
+    "headless": true,
+    "timeout": 30000,
+    "viewerPath": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+    "logDir": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf"
+  },
+  "host": {
+    "cpus": 8,
+    "platforms": "linux"
+  },
+  "code": {
+    "service": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "sha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "frozenBaseline": false
+    },
+    "host": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/index.js",
+      "sha256": "7bcc1f022c6ae0f8ea947aac8c5db18d9fc9f5c9f2bc1448e966a96b77790381",
+      "frozenBaseline": false
+    },
+    "client": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/client.js",
+      "sha256": "765c4a10b6ebcbecb7452e9adb63606d19d7036813a26329d86c385272a3c88c",
+      "frozenBaseline": false
+    },
+    "anim": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/tools/perf-anim.py",
+      "sha256": "947e8d512c92fb1c7c4c6149e767808f7bf2eaa341a6639ca1ffcba97ac1c5e9"
+    },
+    "baseline": {
+      "service": "fd1823cde14bd7d256eb0a63dcae66195e22073a4f8491ead8425bbaf11bd2f4",
+      "host": "c99fe484fba92f13500f7e3de61b018b49e0713980a94558c8331e76a66e72e0",
+      "client": "66644e53cd724fb01e107cb4dbbae80be73f6e4917d1a6c813c94304f860aa15"
+    },
+    "git": {
+      "head": "e87f9dbe6a960bb347c2738ce4ab58273e22d191",
+      "subject": "feat(service): 0.4.0 帧管线（perf-service 交付，sha256 已冻结）",
+      "dirty": [
+        "M tools/perf-panel.mjs",
+        " M verify/PERF-REPORT.md",
+        " M verify/perf/anim-fps-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-key-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-lat-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-static-baseline-0.3.4.jsonl",
+        " M verify/perf/baseline-0.3.4.json",
+        "?? tools/perf-final-probe.py",
+        "?? verify/perf/adversarial.json",
+        "?? verify/perf/anim-browser-adversarial.jsonl",
+        "?? verify/perf/anim-browser-adversarial.jsonl.heal",
+        "?? verify/perf/anim-browser-fps60.jsonl",
+        "?? verify/perf/anim-browser-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-browser-laneB-smoke.jsonl",
+        "?? verify/perf/anim-browser-steady15.jsonl",
+        "?? verify/perf/anim-fps-final-0.4.0-cap15.jsonl",
+        "?? verify/perf/anim-fps-final-0.4.0.jsonl",
+        "?? verify/perf/anim-fps-final-baseline-0.3.4.jsonl",
+        "?? verify/perf/anim-fps-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-fps-steady15.jsonl",
+        "?? verify/perf/anim-key-final-0.4.0-cap15.jsonl",
+        "?? verify/perf/anim-key-final-0.4.0.jsonl",
+        "?? verify/perf/anim-key-final-baseline-0.3.4.jsonl",
+        "?? verify/perf/anim-key-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-lat-final-0.4.0-cap15.jsonl",
+        "?? verify/perf/anim-lat-final-0.4.0.jsonl",
+        "?? verify/perf/anim-lat-final-baseline-0.3.4.jsonl",
+        "?? verify/perf/anim-lat-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-static-final-0.4.0-cap15.jsonl",
+        "?? verify/perf/anim-static-final-0.4.0.jsonl",
+        "?? verify/perf/anim-static-final-baseline-0.3.4.jsonl",
+        "?? verify/perf/anim-static-improved-0.4.0.jsonl",
+        "?? verify/perf/final-0.4.0-cap15.json",
+        "?? verify/perf/final-0.4.0.json",
+        "?? verify/perf/final-baseline-0.3.4.json",
+        "?? verify/perf/fps60.json",
+        "?? verify/perf/improved-0.4.0.json",
+        "?? verify/perf/laneB-smoke.json",
+        "?? verify/perf/shots/",
+        "?? verify/perf/steady15.json"
+      ]
+    }
+  },
+  "targets": {
+    "contentFps": {
+      "min": 15,
+      "unit": "fps",
+      "name": "内容 fps（去重后）",
+      "baseline": 2
+    },
+    "latencyP50": {
+      "max": 150,
+      "unit": "ms",
+      "name": "变化延迟 p50",
+      "baseline": 600
+    },
+    "bytesStatic": {
+      "max": 5120,
+      "unit": "B/s",
+      "name": "静止画面带宽",
+      "baseline": 51200
+    },
+    "serviceCpuDynamic": {
+      "max": 25,
+      "unit": "%",
+      "name": "服务单核 CPU（动态）",
+      "baseline": null
+    },
+    "serviceCpuStatic": {
+      "max": 2,
+      "unit": "%",
+      "name": "服务单核 CPU（静止）",
+      "baseline": null
+    }
+  },
+  "checks": [
+    {
+      "key": "contentFps",
+      "name": "内容 fps（去重后）",
+      "value": 18.849057547122644,
+      "target": "≥15fps",
+      "ok": true,
+      "gap": null,
+      "note": "去重后内容帧率（服务端流（lane S））",
+      "baseline": 2
+    },
+    {
+      "key": "latencyP50",
+      "name": "变化延迟 p50",
+      "value": null,
+      "target": "≤150ms",
+      "ok": null,
+      "gap": null,
+      "note": "X 侧画面变化 → 画出来（服务端流（lane S））",
+      "baseline": 600
+    },
+    {
+      "key": "bytesStatic",
+      "name": "静止画面带宽",
+      "value": null,
+      "target": "≤5120B/s",
+      "ok": null,
+      "gap": null,
+      "note": "未测",
+      "baseline": 51200
+    },
+    {
+      "key": "serviceCpuDynamic",
+      "name": "服务单核 CPU（动态）",
+      "value": 16.899155042247884,
+      "target": "≤25%",
+      "ok": true,
+      "gap": null,
+      "note": "服务进程单核 CPU（动态 15fps 档）",
+      "baseline": null
+    },
+    {
+      "key": "serviceCpuStatic",
+      "name": "服务单核 CPU（静止）",
+      "value": null,
+      "target": "≤2%",
+      "ok": null,
+      "gap": null,
+      "note": "服务进程单核 CPU（静止）",
+      "baseline": null
+    }
+  ],
+  "error": null,
+  "service": {
+    "port": 8513,
+    "home": "/home/xgl/python/DSH插件/.verify/final-display",
+    "started": false,
+    "health": {
+      "ok": true,
+      "service": "dsh-display-viewer",
+      "version": "0.4.0",
+      "backend": "x11",
+      "size": "1600x1000",
+      "input": true,
+      "realDesktop": false,
+      "port": 8513,
+      "pid": 1649623,
+      "sessions": 1,
+      "missing": [],
+      "idleMinutes": 30,
+      "home": "/home/xgl/python/DSH插件/.verify/final-display"
+    },
+    "viewer": "service/dsh-display-viewer.py"
+  },
+  "laneS": {
+    "streamConfig": {
+      "requested": {
+        "quality": 70,
+        "fps": 30,
+        "scale": 1
+      },
+      "status": 200,
+      "applied": {
+        "ok": true,
+        "session": "perf1",
+        "config": {
+          "quality": 70,
+          "fps": 30,
+          "scale": 1
+        },
+        "effective": {
+          "quality": 70,
+          "fps": 30,
+          "scale": 1
+        }
+      },
+      "note": "服务接受 stream-config"
+    },
+    "provenance": {
+      "pid": 1649623,
+      "startedAt": "2026-09-25T05:29:43.500Z",
+      "cmdline": "python3 /home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "file": "service/dsh-display-viewer.py",
+      "fileMtime": "2026-09-25T05:22:02.508Z",
+      "fileSha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "fileNewerThanProcess": false,
+      "note": "进程启动后文件未再改动（文件 sha256 可信）"
+    },
+    "pids": {
+      "service": 1649623,
+      "xvfb": [
+        1651317
+      ],
+      "display": ":314"
+    },
+    "phases": {
+      "dynamic": {
+        "seconds": 20.001,
+        "framesSent": 377,
+        "contentFrames": 377,
+        "sentFps": 18.849057547122644,
+        "contentFps": 18.849057547122644,
+        "bytes": 11266156,
+        "bytesPerSec": 563279.636018199,
+        "avgFrameBytes": 29883.702917771883,
+        "maxFrameBytes": 31839,
+        "warmupExcludedSec": 6.666666666666667,
+        "steady": {
+          "contentFps": 18.823588345764133,
+          "bytesPerSec": 562807.6678600159,
+          "seconds": 13.334333251953124
+        },
+        "animFlips": 395,
+        "animFps": 19.74901254937253,
+        "serverStats": {
+          "fps": 20,
+          "fpsCap": 20,
+          "fpsActual": 20,
+          "userFps": 30,
+          "idle": false,
+          "captured": 2134,
+          "encoded": 1183,
+          "skipped": 951,
+          "bytesPerSec": 597291.3,
+          "quality": 70,
+          "scale": 1,
+          "mode": "xgetimage+XDamage",
+          "captureMs": 4.66,
+          "encodeMs": 14.88,
+          "captureMaxMs": 11,
+          "encodeMaxMs": 25.3,
+          "cursor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "reason": "有余量（16ms/帧 < 20ms）→ fps 回升到 20",
+          "encoder": "ffmpeg",
+          "cursorOnly": 0,
+          "clients": 1,
+          "seq": 1183,
+          "crc": 214003087,
+          "damageEvents": 780,
+          "lastFrameAgeMs": 17,
+          "targetFps": 20,
+          "idleFps": 1,
+          "damageAgoMs": 8,
+          "costMs": 19.54,
+          "stream": {
+            "fps": 20,
+            "fpsCap": 20,
+            "quality": 70,
+            "scale": 1,
+            "mode": "xgetimage+XDamage"
+          },
+          "session": "perf1",
+          "ok": true,
+          "started": true,
+          "frameError": null
+        },
+        "cpuPct": {
+          "1649623": 16.899155042247884,
+          "1651317": 4.849757512124393,
+          "1672087": 0.6999650017499125,
+          "animator": 0.6999650017499125,
+          "xvfbSum": 4.849757512124393
+        },
+        "streamHeadersSeen": true,
+        "jpegMagicOk": true,
+        "contentType": "multipart/x-mixed-replace; boundary=frame",
+        "streamStatus": 200,
+        "streamError": null,
+        "streamRetries": 0,
+        "firstFrameWaitMs": -98,
+        "animExit": {
+          "readyT": 1790314455.5975552,
+          "doneT": null,
+          "aliveSec": null,
+          "reason": null,
+          "flips": null,
+          "drawErrs": 0
+        },
+        "animator": {
+          "pid": 1672087,
+          "display": ":314",
+          "fallbackExec": false,
+          "log": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/anim-fps-final-0.4.0-cap30.jsonl"
+        }
+      }
+    },
+    "metrics": {
+      "contentFps": 18.849057547122644,
+      "sentFps": 18.849057547122644,
+      "serverStatsFps": 20,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": 563279.636018199,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": 16.899155042247884,
+      "serviceCpuStatic": null
+    }
+  },
+  "summary": {
+    "laneS": {
+      "contentFps": 18.849057547122644,
+      "sentFps": 18.849057547122644,
+      "serverStatsFps": 20,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": 563279.636018199,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": 16.899155042247884,
+      "serviceCpuStatic": null
+    },
+    "laneB": null,
+    "failed": [],
+    "pass": true
+  },
+  "finishedAt": "2026-09-25T05:34:35.382Z",
+  "log": [
+    "",
+    "── lane S（服务端，端口 8513，session=perf1） ───────────────────────────────",
+    "服务版本 0.4.0 backend=x11 size=1600x1000 pid=1649623",
+    "会话显示 :314 （1600x1000）",
+    "stream-config → HTTP 200 {\"ok\":true,\"session\":\"perf1\",\"config\":{\"quality\":70,\"fps\":30,\"scale\":1},\"effective\":{\"quality\":70,\"fps\":30,\"scale\":1}}",
+    "进程取证：pid=1649623 启动于 2026-09-25T05:29:43.500Z；进程启动后文件未再改动（文件 sha256 可信）",
+    "CPU 采样对象：service=1649623 xvfb=1651317 (CLK_TCK=100)",
+    "动态窗口 20.0s：发帧 377（18.8/s） 内容帧 377（**18.85 fps**） 带宽 550.1KB/s 平均帧 29.2KB",
+    "        稳态（丢掉前 6.666666666666667s 爬坡）：内容帧 **18.82 fps**、带宽 549.6KB/s",
+    "        靶画面实际变化 19.74901254937253 fps；服务端 /stats fps=20 captured=2134 encoded=1183 skipped=951 bytesPerSec=597291.3 mode=xgetimage+XDamage",
+    "        CPU：服务 16.90%｜Xvfb 4.85%｜靶程序 0.70%",
+    "",
+    "（没有 --url：只跑了 lane S。客户端侧指标 = 未测，见报告\"未测项\"）",
+    "",
+    "── 判定（契约 §5.1 验收线） ─────────────────────────────────────────────────",
+    "口径：服务端流（lane S）",
+    "",
+    "指标                              基线(0.3.4)      目标        实测            结论",
+    "────────────────────────────────────────────────────────────────────────────────────────",
+    "内容 fps（去重后）                  2fps           ≥15        18.85fps       PASS",
+    "变化延迟 p50                     600ms          ≤150       未测             未测",
+    "静止画面带宽                       50.0KB/s       ≤5120      未测             未测",
+    "服务单核 CPU（动态）                 —              ≤25        16.90%         PASS",
+    "服务单核 CPU（静止）                 —              ≤2         未测             未测",
+    "",
+    "✅ 本次测得的口径内全部达标（未测：变化延迟 p50、静止画面带宽、服务单核 CPU（静止））"
+  ]
+}
