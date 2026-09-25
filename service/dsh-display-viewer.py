@@ -35,16 +35,37 @@
 每会话（``/s/<sessionId>/…``；sessionId 必须匹配 ``^[A-Za-z0-9._-]{1,64}$``，否则 400）：
 
     GET  /s/<sid>/            独立页面（人用兜底；显示缺失依赖与光标位置）
-    GET  /s/<sid>/snapshot    单帧 JPEG（**不阻塞**：没有帧立刻 503）
-    GET  /s/<sid>/stream      MJPEG 流（能感知客户端断开）
+    GET  /s/<sid>/snapshot    单帧 JPEG（**不阻塞**：没有帧立刻 503；可选 ?quality=&scale=）
+    GET  /s/<sid>/stream      MJPEG 长连接（逐帧头 X-DSH-Seq/Time/Size/Cursor，多客户端广播）
     GET  /s/<sid>/state       状态 JSON（cursor / input / realDesktop / tooltip / 抓帧错误）
     GET  /s/<sid>/display     显示号与后端（脚本用）
     GET  /s/<sid>/procs       本会话在本服务里拉起的程序
+    GET  /s/<sid>/stats       帧管线指标（fps/带宽/耗时/档位/模式，契约 §5.5）
+    GET  /s/<sid>/stream-config  当前档位（quality/fps/scale，只读、不建会话）
     POST /s/<sid>/input       输入事件（见 §1.3；**按到达顺序串行执行**）
+    POST /s/<sid>/stream-config  改档（JSON 或查询串；非法值 400）
     POST /s/<sid>/exec        {"argv":[…],"cwd":…,"wait":false} 在会话显示上跑程序
     POST /s/<sid>/kill        {"pid":123}
     POST /s/<sid>/close       回收本会话（等价于 DELETE /s/<sid>）
     DELETE /s/<sid>           回收本会话（停 Xvfb、杀子进程、释放显示号）
+
+## 帧管线（0.4.0，契约 §5.2/§5.3）
+
+抓帧 → 去重 → 编码 → 广播，一条会话一条线程：
+
+* **抓帧**：X11 走进程内 ``ctypes + libX11`` 的 ``XGetImage``（实测 4.9ms/帧，
+  旧实现每帧 spawn 一次 ``import`` 要 45ms）；配 ``XDamage`` 事件驱动 ——
+  画面不动时**一次唤醒都不需要**（CPU≈0），一动立刻醒。没有 XDamage/没有 libX11
+  或像素格式认不出 → 自动退回 ``import``（慢但能用，回退路径不删）。
+* **编码**：常驻 ``ffmpeg``（``rawvideo → mjpeg``，``-threads 1``：帧级多线程会把
+  头几帧憋在内部缓冲里，实测最坏 3 秒才吐第一帧）。没有 ffmpeg → 退回 ``import``。
+* **去重**：内容没变就不编码、不发帧（``/stats.skipped`` 涨、带宽趋近 0）；
+  只有指针动了才重发**缓存的那张 JPEG**（上限 5fps，客户端的光标才不会冻住）。
+* **自适应**：``quality``(1..100) / ``fps``(1..30) / ``scale``(0.25..1.0)，
+  默认 70/15/1；``POST /s/<sid>/stream-config`` 可改。抓不动或编不过来时
+  **先降 fps → 再降 scale → 最后降 quality**，原因写进 ``/stats.reason``；
+  闲下来（连续 5 秒远低于预算）再逐档回升。降档只动服务端自己的 ``auto``，
+  客户端设的目标档永远保留。
 
 ## 怎么在某个会话的显示上跑程序
 
@@ -114,6 +135,7 @@ import sys
 import threading
 import time
 import zlib
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -162,7 +184,42 @@ MAC_INPUT = WIN_INPUT
 #: 抓帧间隔。win32 是纯本地调用（实测约 34ms/帧），可以贴着页面 130ms 的拉帧节奏来；
 #: X11/Wayland 每次都要起一个外部进程，间隔给大一点，别把 CPU 烧在抓屏上。
 #: darwin 每次要起一个 screencapture 进程，同样给大一点。
+#: ⚠️ 0.4.0 起 X11 走进程内 XGetImage + XDamage，**不再按这个间隔轮询**；它现在只用于：
+#: ① win32/darwin 的抓帧节奏；② 抓帧失败后的退避。
 GRAB_INTERVAL = {"win32": 0.12, "darwin": 0.3}.get(BACKEND, 0.5)
+
+# ---------------------------------------------------------------- 流畅度档位（契约 §5.2/§5.5）
+#: 默认档：客户端/宿主不调 /stream-config 时就用它。
+DEFAULT_QUALITY, DEFAULT_FPS, DEFAULT_SCALE = 70, 15, 1.0
+MIN_QUALITY, MAX_QUALITY = 1, 100
+MIN_FPS, MAX_FPS = 1, 30
+MIN_SCALE, MAX_SCALE = 0.25, 1.0
+#: 自适应降档到底线就停：quality 再低画面就没法看了，宁可掉帧也别糊成一片。
+ADAPT_MIN_QUALITY = 20
+#: 一帧的耗时预算 = 帧周期的这个比例（剩下 40% 留给广播、客户端与调度抖动）。
+ADAPT_BUDGET_RATIO = 0.6
+#: 两次降档之间的冷却（秒）：降一档要等它生效再看，否则一次抖动就一路降到底。
+ADAPT_COOLDOWN = 2.0
+#: 连续这么长时间"很闲"才回升一档（防止在阈值附近来回抖）。
+ADAPT_RECOVER_HOLD = 5.0
+#: 画面静止时：没有 XDamage 时的兜底轮询节奏。
+IDLE_FPS = 4
+#: 画面静止时：有 XDamage 时的兜底巡检间隔（秒）—— 万一某次变化没产生 damage
+#: （例如扩展在某些 X 服务器上的行为差异），1 秒内也能自己发现。
+IDLE_TICK = 1.0
+#: 慢速回退（每帧 spawn import，45ms/帧）时的静止巡检节奏：1fps。
+IDLE_FPS_SLOW = 1
+#: "仅指针移动"的重发上限（每秒）。画面没变但指针动了，就重发**缓存的那张 JPEG**
+#: （不重新编码），否则客户端的光标会跟着画面一起冻住。
+CURSOR_FPS = 5
+#: 内容变化后按目标 fps 抓帧的保持时间（秒）：拖动窗口时不能因为"这一帧没变"就掉回低频。
+ACTIVE_HOLD = 1.5
+#: /stats 里 fps / bytesPerSec 的滑动窗口（秒）。
+STATS_WINDOW = 3.0
+#: /stats 里 damageEvents 的窗口（秒）。
+DAMAGE_WINDOW = 1.0
+#: /snapshot 不带参数时用的质量（AI 截图要看清字，比流里的 70 更清楚）。
+SNAPSHOT_QUALITY = 90
 #: 协议注入工具（tools/virtual-pointer 编译产物），只在 wayland 后端用得到。
 VPTR = os.environ.get("DSH_VIEW_VPTR") or os.path.join(HOME_DIR, "vptr", "vptr")
 
@@ -905,6 +962,39 @@ OWNER_PROP = "DSH_DISPLAY_SESSION"
 _X11_ANY_TYPE = 0
 _x11_lib = None                                      # None=未加载；False=加载失败
 _x11_lock = threading.Lock()
+#: 见过的 X 协议错误数（诊断用；0.4.0 起装了处理器，不再让 Xlib 把服务带走）。
+X11_ERRORS = 0
+
+
+def _x11_error_handler(_dpy, _event) -> int:
+    """X 协议错误：记一笔就返回 0（Xlib 默认处理器会 print + exit(1)）。
+
+    ctypes 回调里抛异常帮不上忙（ctypes 会把异常吞掉再返回 0），所以只能自己记住。
+    """
+    global X11_ERRORS
+    X11_ERRORS += 1
+    if X11_ERRORS <= 3 or X11_ERRORS % 100 == 0:
+        print(f"⚠ X11 协议错误（第 {X11_ERRORS} 次，已忽略，服务继续）", flush=True)
+    return 0
+
+
+def _x11_io_error_handler(_dpy) -> int:
+    """X 连接断了（Xvfb 没了/显示号被别人顶了）：**绝不返回**，就地 park。
+
+    Xlib 的规矩：``XIOErrorHandler`` 一旦返回，Xlib 立刻 ``exit(1)`` ——
+    那就等于"一个会话的显示死了，整个服务（以及所有其它会话）一起死"。
+    这条线程本来也已经没救了（它接下来只会拿到同一个坏连接），停在这里最划算：
+    其它会话、HTTP、回收线程都不受影响。Session.stop() 只 join 1.5 秒就放手，
+    正是为了这种"线程停住但不拖住回收"的情况。
+    """
+    print("⚠ X11 连接断了（Xvfb 被回收？）：抓帧线程就地停住，服务继续", flush=True)
+    while True:
+        time.sleep(3600)
+
+
+_x11_error_handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p,
+                                      ctypes.c_void_p)(_x11_error_handler)
+_x11_io_error_handler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)(_x11_io_error_handler)
 
 
 def _x11():
@@ -944,6 +1034,46 @@ def _x11():
             lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
             lib.XFree.restype = ctypes.c_int
             lib.XFree.argtypes = [ctypes.c_void_p]
+            # --- 0.4.0：抓帧（XGetImage）与指针位置（XQueryPointer）也走同一个 libX11。
+            lib.XDefaultDepth.restype = ctypes.c_int
+            lib.XDefaultDepth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XDisplayWidth.restype = ctypes.c_int
+            lib.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XDisplayHeight.restype = ctypes.c_int
+            lib.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.XGetImage.restype = ctypes.c_void_p
+            lib.XGetImage.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+                                      ctypes.c_ulong, ctypes.c_int]
+            lib.XQueryPointer.restype = ctypes.c_int
+            lib.XQueryPointer.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+                ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
+                ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint)]
+            lib.XPending.restype = ctypes.c_int
+            lib.XPending.argtypes = [ctypes.c_void_p]
+            lib.XNextEvent.restype = ctypes.c_int
+            lib.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            lib.XConnectionNumber.restype = ctypes.c_int
+            lib.XConnectionNumber.argtypes = [ctypes.c_void_p]
+            # ⚠️ **不要**想着调 XDestroyImage：它是 Xutil.h 里的宏
+            #    （``((*image->f.destroy_image)(image))``），libX11 里**没有这个符号**。
+            #    释放 XGetImage 的返回值得自己来两步：先 XFree(image->data) 再 XFree(image)
+            #    —— 只 XFree(image) 会漏掉那张 1600×1000×4 = 6.4MB 的像素缓冲（实测内存一路涨）。
+            lib.XSetErrorHandler.restype = ctypes.c_void_p
+            lib.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+            lib.XSetIOErrorHandler.restype = ctypes.c_void_p
+            lib.XSetIOErrorHandler.argtypes = [ctypes.c_void_p]
+            # Xlib 默认的错误处理器会 **print + exit(1)**：X 服务器一断（Xvfb 被回收、
+            # 别的实例顶掉显示号）整个服务就连带所有会话一起死。装上自己的处理器：
+            #   * 协议错误（BadWindow 之类）→ 记一笔、返回 0，继续跑；
+            #   * IO 错误（连接真的断了）→ **绝不返回**（Xlib 规定返回即 exit(1)），
+            #     就地 park 住这条抓帧线程，服务与其它会话照常。
+            # 之所以敢 park：Xlib 的连接只有管线线程在用（XCloseDisplay 也在那条线程里），
+            # 停住的正是"已经坏掉的那条会话的抓帧线程"，不会牵住 HTTP 线程。
+            lib.XSetErrorHandler(ctypes.cast(_x11_error_handler, ctypes.c_void_p))
+            lib.XSetIOErrorHandler(ctypes.cast(_x11_io_error_handler, ctypes.c_void_p))
             _x11_lib = lib
         except Exception as exc:                     # noqa: BLE001
             print(f"⚠ 加载 libX11 失败（显示归属校验会退化）：{type(exc).__name__}: {exc}",
@@ -1224,6 +1354,9 @@ class Session:
         self.frame_error = None
         self.frame_count = 0
         self.last_frame_at = 0.0
+        # 帧管线（契约 §5.2）：状态挂在会话上（/stats、/snapshot 都读它），
+        # 线程由 session() 起、由 stop() 收。
+        self.pipe = Pipeline(self)
         # /exec 拉起的程序。
         self.procs = []
         self.proc_lock = threading.Lock()
@@ -1481,11 +1614,20 @@ class Session:
         return False
 
     def stop(self, release: bool = False, forget: bool = False) -> None:
-        """回收：停输入 worker、杀 /exec 子进程、停显示服务器、释放显示号。
+        """回收：停管线、停输入 worker、杀 /exec 子进程、停显示服务器、释放显示号。
 
         幂等；任何一步失败都不抛（回收路径绝不能把服务带崩）。
         """
         self._closed = True
+        # ⚠️ 顺序很重要：**先**让帧管线收手，**再**杀 Xvfb。
+        #    0.4.0 起抓帧是进程内 XGetImage：管线正在调用 Xlib 时把 Xvfb 杀掉，
+        #    Xlib 会走 IO 错误处理器把那条线程 park 住（服务不会死，但会话会留个僵尸线程）。
+        #    先 join 就基本不会撞上这个窗口。
+        try:
+            self.pipe.stop()
+        except Exception as exc:                     # noqa: BLE001
+            print(f"[{self.sid}] 停帧管线出错（继续回收）：{type(exc).__name__}: {exc}",
+                  flush=True)
         try:
             self.events.put_nowait(None)             # 让 worker 退出
         except queue.Full:
@@ -1515,6 +1657,32 @@ class Session:
                     "WAYLAND_DISPLAY": "wayland-1"}
         return {**os.environ, "DISPLAY": self.display, "QT_QPA_PLATFORM": "xcb",
                 "WAYLAND_DISPLAY": ""}
+
+    def snapshot_jpeg(self, quality=None, scale=None) -> bytes:
+        """``/snapshot`` 用的单帧 JPEG。
+
+        * 不带 ``quality`` / ``scale`` → 直接给**流里最新的那帧**（旧的语义与速度）；
+        * 带了 → **单独编一帧**（自己的 X 连接 + 一次性编码进程），
+          绝不去动常驻编码器：那会为了截一张图把流的节奏打断。
+        * 拿不到就返回空 → 调用方回 503（**不阻塞**，这是契约 §1.2 的硬要求）。
+        """
+        cfg = self.pipe.effective_config()
+        q = cfg["quality"] if quality is None else quality
+        s = cfg["scale"] if scale is None else scale
+        if (int(q), round(float(s), 3)) == (int(cfg["quality"]), round(float(cfg["scale"]), 3)):
+            with self.lock:
+                if self.latest:
+                    return self.latest
+        try:
+            shot = self.pipe.encode_shot(q, s)
+        except Exception as exc:                     # noqa: BLE001
+            print(f"[{self.sid}] 高清截图失败（回退到流里那帧）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            shot = b""
+        if shot:
+            return shot
+        with self.lock:
+            return self.latest
 
     # ------------------------------------------------------------------ 输入队列
     def enqueue(self, event: dict) -> int:
@@ -1605,9 +1773,11 @@ def session(sid: str) -> Session:
         if sess is None:
             sess = _sessions[sid] = Session(sid)
         sess.touch()
+    # 幂等：线程还活着就什么都不做；停了（park 在 Xlib 里 / 抓帧线程异常退出）就重起一条。
+    # 放在这里是为了"自愈"——每次 HTTP 请求路过都会顺手检查一次。
+    sess.pipe.revive()
     if created:
-        threading.Thread(target=_grab_loop, args=(sess,), daemon=True,
-                         name=f"grab-{sid}").start()
+        print(f"[{sid}] 新会话（显示 {sess.display}）", flush=True)
     return sess
 
 
@@ -1974,7 +2144,594 @@ def _inject_wayland(sess: Session, obj: dict) -> None:
             run_tool(sess, ["wtype", "-k", key])
 
 
-# ---------------------------------------------------------------- 抓帧
+# ---------------------------------------------------------------- 抓帧 / 帧管线
+# 契约 §5.2：抓帧（进程内 XGetImage）→ 去重（CRC32）→ 编码（常驻 ffmpeg）→ 广播（MJPEG 长连接）。
+#
+# 0.3.4 的三个瓶颈（本机 1600×1000 X11 实测）：
+#   ① 抓帧：每帧 spawn 一次 `import -window root` = 45ms/帧（还要自带一次 X 抓屏）；
+#      进程内 XGetImage 直读 = 4.9ms/帧。
+#   ② 节奏：GRAB_INTERVAL=0.5 → 内容只有 2fps；XDamage 事件驱动后变化延迟≈0ms。
+#   ③ 编码：每帧无条件重编码（画面静止也照编照发）；常驻 ffmpeg 稳态 16-22ms/帧，
+#      内容没变就一帧都不编。
+ZPIXMAP = 2
+
+#: 小于这个字节数的帧直接用 CRC32 当去重键（JPEG 几十 KB，CRC 只要几十微秒）；
+#: 比它大的（X11 原始 BGRA 是 6.4MB，CRC 要 4.9ms）先用一次内存比较判等。
+DEDUP_CRC_ALWAYS = 256 * 1024
+#: 编码一帧的超时（秒）：超了就当编码进程坏了，重启它（别把管线卡死在这）。
+ENCODE_TIMEOUT = 10.0
+#: 抓帧失败、退回 import 之后的连续失败退避上限（秒）。
+GRAB_FAIL_MAX_BACKOFF = 5.0
+
+_xdamage_lib = None                                  # None=未加载；False=加载失败
+
+
+def _xdamage():
+    """懒加载 libXdamage —— 用来知道"画面什么时候变的"（没有它就退回轮询）。
+
+    为什么值得引入一个扩展：XDamage 让静止画面**一次唤醒都不需要**（CPU≈0），
+    而变化一发生立刻醒（不用等下一个轮询节拍）。实测 root window 上的
+    XDamageReportRawRectangles **能收到子窗口重绘**（1 秒 69 个事件），
+    这正是"窗口里跑的程序重绘"这条最常见路径。
+    扩展不可用（老服务器/非 X11）→ 返回 None，管线自动退回定时轮询。
+    """
+    global _xdamage_lib
+    with _x11_lock:
+        if _xdamage_lib is not None:
+            return _xdamage_lib or None
+        try:
+            lib = ctypes.CDLL("libXdamage.so.1")
+            lib.XDamageQueryExtension.restype = ctypes.c_int
+            lib.XDamageQueryExtension.argtypes = [ctypes.c_void_p,
+                                                  ctypes.POINTER(ctypes.c_int),
+                                                  ctypes.POINTER(ctypes.c_int)]
+            lib.XDamageCreate.restype = ctypes.c_ulong
+            lib.XDamageCreate.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int]
+            lib.XDamageSubtract.restype = None
+            lib.XDamageSubtract.argtypes = [ctypes.c_void_p, ctypes.c_ulong,
+                                            ctypes.c_ulong, ctypes.c_ulong]
+            lib.XDamageDestroy.restype = None
+            lib.XDamageDestroy.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            _xdamage_lib = lib
+        except Exception as exc:                     # noqa: BLE001
+            print(f"⚠ 加载 libXdamage 失败（改成定时轮询，功能不受影响）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+            _xdamage_lib = False
+        return _xdamage_lib or None
+
+
+class XImage(ctypes.Structure):
+    """Xlib 的 ``XImage`` 头字段（只写到 blue_mask）。
+
+    后面还有 obdata 与函数指针表（destroy_image/get_pixel…），我们只通过指针读，
+    不需要它们的布局；**但 bytes_per_line / bits_per_pixel 必须读对** ——
+    深屏（24/30 位、行对齐补白）下 ``width*4`` 并不等于一行字节数，按紧凑排列解析
+    会得到斜掉的画面。
+    """
+
+    _fields_ = [("width", ctypes.c_int), ("height", ctypes.c_int),
+                ("xoffset", ctypes.c_int), ("format", ctypes.c_int),
+                ("data", ctypes.c_void_p), ("byte_order", ctypes.c_int),
+                ("bitmap_unit", ctypes.c_int), ("bitmap_bit_order", ctypes.c_int),
+                ("bitmap_pad", ctypes.c_int), ("depth", ctypes.c_int),
+                ("bytes_per_line", ctypes.c_int), ("bits_per_pixel", ctypes.c_int),
+                ("red_mask", ctypes.c_ulong), ("green_mask", ctypes.c_ulong),
+                ("blue_mask", ctypes.c_ulong)]
+
+
+class X11Screen:
+    """进程内 X11 抓帧：XGetImage（BGRA）+ XDamage（变化通知）+ XQueryPointer（指针）。
+
+    **每条会话一个连接**，且**只在管线线程里用** —— 一旦显示没了，Xlib 会走
+    IO 错误处理器把这条线程 park 住（见 ``_x11_io_error_handler``），
+    所以绝不能让 HTTP 线程也共享这个连接。
+    """
+
+    def __init__(self, display: str, name: str = "") -> None:
+        self.display = display
+        self.name = name
+        self.dpy = None
+        self.root = 0
+        self.width = 0
+        self.height = 0
+        self.depth = 0
+        self.bits_per_pixel = 0
+        self.bytes_per_line = 0
+        self.fd = -1
+        self.damage = None                           # Damage id；None = 没有扩展
+        self.damage_events = 0
+        self.slot = 0
+        self._bufs: list = [None, None]
+        self._views: list = [None, None]
+        self._evbuf = ctypes.create_string_buffer(192)   # XEvent 是 192 字节
+
+    # ---------------------------------------------------------------- 打开 / 关闭
+    def open(self) -> bool:
+        lib = _x11()
+        if not lib:
+            return False
+        dpy = lib.XOpenDisplay(self.display.encode("utf-8"))
+        if not dpy:
+            return False
+        self.dpy = dpy
+        self.fd = lib.XConnectionNumber(dpy)
+        self.root = lib.XDefaultRootWindow(dpy)
+        self.width = lib.XDisplayWidth(dpy, 0)
+        self.height = lib.XDisplayHeight(dpy, 0)
+        self.depth = lib.XDefaultDepth(dpy, 0)
+        self._init_damage()
+        return self.width > 0 and self.height > 0
+
+    def _init_damage(self) -> None:
+        xd = _xdamage()
+        if not xd:
+            return
+        ev, er = ctypes.c_int(), ctypes.c_int()
+        try:
+            if not xd.XDamageQueryExtension(self.dpy, ctypes.byref(ev), ctypes.byref(er)):
+                return
+            # XDamageReportRawRectangles(=0)：每个矩形一条事件。实测 root 上建 damage
+            # 能收到子窗口的重绘（非合成 X11 也一样），这是"damage 驱动"的前提。
+            self.damage = xd.XDamageCreate(self.dpy, self.root, 0)
+        except Exception:                            # noqa: BLE001
+            self.damage = None
+
+    def close(self) -> None:
+        lib = _x11()
+        if self.dpy is not None and lib:
+            xd = _xdamage()
+            if self.damage and xd:
+                try:
+                    xd.XDamageDestroy(self.dpy, self.damage)
+                except Exception:                    # noqa: BLE001
+                    pass
+            self.damage = None
+            try:
+                lib.XCloseDisplay(self.dpy)
+            except Exception:                        # noqa: BLE001
+                pass
+        self.dpy = None
+        self.fd = -1
+
+    # ---------------------------------------------------------------- 抓帧
+    def _view(self, index: int):
+        size = self.width * self.height * 4
+        view = self._views[index]
+        if view is None or len(view) != size:
+            buf = bytearray(size)
+            view = (ctypes.c_char * size).from_buffer(buf)
+            self._bufs[index] = buf
+            self._views[index] = view
+        return self._bufs[index], view
+
+    def grab(self):
+        """抓一帧 → 紧凑 BGRA bytearray（认不出的像素格式返回 None）。
+
+        ⚠️ 交出的缓冲是**两块交替复用**的（调用方可以直接拿它跟上一次比内容，
+        不必再复制一份 6.4MB）。因此两次连续调用**绝不会返回同一个对象**。
+        """
+        lib = _x11()
+        if not lib or self.dpy is None:
+            return None
+        img = lib.XGetImage(self.dpy, self.root, 0, 0, self.width, self.height,
+                            ctypes.c_ulong(-1), ZPIXMAP)
+        if not img:
+            return None
+        try:
+            xi = ctypes.cast(img, ctypes.POINTER(XImage)).contents
+            data = xi.data
+            bpl = xi.bytes_per_line
+            bpp = xi.bits_per_pixel
+            self.bits_per_pixel, self.bytes_per_line = bpp, bpl
+            if bpp == 32 and self._standard_bgra(xi):
+                self.slot ^= 1
+                buf, view = self._view(self.slot)
+                if bpl == self.width * 4:
+                    ctypes.memmove(view, data, len(buf))
+                else:                                # 行对齐补白：逐行搬（别假设紧凑）
+                    for row in range(self.height):
+                        ctypes.memmove(ctypes.byref(view, row * self.width * 4),
+                                       data + row * bpl, self.width * 4)
+                return buf
+            if bpp == 24:                            # 3 字节/像素：扩成 BGRA
+                return self._expand(data, bpl, 3)
+            if bpp == 16:                            # 5-6-5
+                return self._expand(data, bpl, 2)
+            return None                              # 认不出的格式：宁慢不乱，交给 import
+        finally:
+            # ⚠️ 必须 data + image 各 Free 一次（XDestroyImage 是宏，libX11 里没这个符号）
+            try:
+                lib.XFree(data)
+            except Exception:                        # noqa: BLE001
+                pass
+            lib.XFree(img)
+
+    @staticmethod
+    def _standard_bgra(xi) -> bool:
+        """B/G/R 掩码与字节序是否就是 ffmpeg 的 ``bgra``（Xvfb 24 位深屏正好是）。"""
+        return (xi.byte_order == 0 and xi.red_mask == 0xFF0000
+                and xi.green_mask == 0xFF00 and xi.blue_mask == 0xFF)
+
+    def _expand(self, data, bpl, step: int):
+        """24bpp / 16bpp 慢路径：逐像素扩成 BGRA（这类深屏很少见，慢一点没关系）。"""
+        buf = bytearray(self.width * self.height * 4)
+        raw = ctypes.string_at(data, bpl * self.height)
+        out = 0
+        for row in range(self.height):
+            base = row * bpl
+            if step == 3:
+                for col in range(self.width):
+                    i = base + col * 3
+                    buf[out] = raw[i]
+                    buf[out + 1] = raw[i + 1]
+                    buf[out + 2] = raw[i + 2]
+                    buf[out + 3] = 0xFF
+                    out += 4
+            else:
+                for col in range(self.width):
+                    i = base + col * 2
+                    px = raw[i] | (raw[i + 1] << 8)
+                    buf[out] = (px & 0x1F) << 3
+                    buf[out + 1] = ((px >> 5) & 0x3F) << 2
+                    buf[out + 2] = ((px >> 11) & 0x1F) << 3
+                    buf[out + 3] = 0xFF
+                    out += 4
+        return buf
+
+    # ---------------------------------------------------------------- 变化通知 / 指针
+    def wait(self, timeout: float, extra=()) -> bool:
+        """等"有事发生"：有 damage 就 select 在 X 连接上（静止时 0 CPU），否则睡。
+
+        ``extra`` 是额外的可读 fd（管线用一根自管道打断等待：改档/回收要立刻生效）。
+        """
+        lib = _x11()
+        if lib is None or self.dpy is None:
+            time.sleep(max(0.0, timeout))
+            return False
+        fds = [self.fd]
+        for fd in extra:
+            if fd is not None and fd >= 0:
+                fds.append(fd)
+        try:
+            ready, _w, _x = select.select(fds, [], [], max(0.0, timeout))
+        except (OSError, ValueError):
+            return False
+        if self.fd not in ready:
+            return False
+        hit = False
+        try:
+            # 成串爆发的 damage（一次拖动几十个矩形）在这里一次性排空，
+            # 管线那边只在"该出帧的时刻"抓一帧 —— 合并/去抖就是这么做的。
+            while lib.XPending(self.dpy):
+                lib.XNextEvent(self.dpy, self._evbuf)
+                self.damage_events += 1
+                hit = True
+        except Exception:                            # noqa: BLE001
+            return False
+        xd = _xdamage()
+        if hit and self.damage and xd:
+            try:
+                xd.XDamageSubtract(self.dpy, self.damage, 0, 0)   # 复位，别让区域无限涨
+            except Exception:                        # noqa: BLE001
+                pass
+        return hit
+
+    def pointer(self):
+        """指针位置（**未归一化的像素坐标**）；拿不到返回 None。
+
+        用 XQueryPointer（一次往返，≈50µs），不再为每个 /state 请求 spawn 一个 xdotool。
+        """
+        lib = _x11()
+        if lib is None or self.dpy is None:
+            return None
+        root_ret, child_ret = ctypes.c_ulong(), ctypes.c_ulong()
+        rx, ry, wx, wy = (ctypes.c_int(), ctypes.c_int(), ctypes.c_int(), ctypes.c_int())
+        mask = ctypes.c_uint()
+        try:
+            ok = lib.XQueryPointer(self.dpy, self.root, ctypes.byref(root_ret),
+                                   ctypes.byref(child_ret), ctypes.byref(rx),
+                                   ctypes.byref(ry), ctypes.byref(wx), ctypes.byref(wy),
+                                   ctypes.byref(mask))
+        except Exception:                            # noqa: BLE001
+            return None
+        return (rx.value, ry.value) if ok else None
+
+
+class FrameDedup:
+    """帧去重（契约 §5.2）：内容没变就不编码、不发帧。
+
+    判定顺序按帧大小分两条（1600×1000×4 = 6.4MB 实测）：
+      * 小帧（≤ ``DEDUP_CRC_ALWAYS``，即 JPEG 几十 KB）→ 直接算 CRC32 当键（几十µs）；
+      * 大帧（X11 原始 BGRA 6.4MB）→ 先跟上一帧比内容（bytes 比较走 C 的 memcmp，
+        0.6ms；而 X11Screen 的两块缓冲交替复用，比较不需要额外复制），
+        **只有变了才算全帧 CRC32**（4.9ms）。
+    为什么不无条件算 CRC32：静止时 1-4 次/秒的抓帧下，它自己就要 2% 以上 CPU，
+    而它回答的问题（内容变了没）用一次比较就能精确回答（还没有碰撞风险）。
+    算出来的 CRC32 同时是 /stats 里的对外指纹，客户端/测试脚本可以据此判断"这一帧是不是新的"。
+    """
+
+    def __init__(self) -> None:
+        self.prev = None
+        self.crc = 0
+
+    def reset(self) -> None:
+        self.prev = None
+        self.crc = 0
+
+    def check(self, data):
+        """→ ``(changed, crc)``。"""
+        prev, crc, changed = self.prev, self.crc, True
+        if prev is not None and len(prev) == len(data):
+            if len(data) <= DEDUP_CRC_ALWAYS:
+                crc = zlib.crc32(data)
+                changed = crc != self.crc
+            else:
+                changed = prev != data
+        if changed:
+            crc = zlib.crc32(data)
+        self.prev, self.crc = data, crc
+        return changed, crc
+
+
+def _ewma(old: float, new: float, alpha: float = 0.3) -> float:
+    """指数滑动平均：单帧抖动不该立刻触发降档，但持续变慢要看得出来。"""
+    return new if old <= 0 else old * (1 - alpha) + new * alpha
+
+
+def quality_to_qv(quality) -> int:
+    """quality（1..100，越大越好）→ ffmpeg 的 ``-q:v``（2..31，越小越好）。
+
+    70 → 11、90 → 5、100 → 2（mjpeg 的 -q:v 到 2 就到头了，1 与 2 没差别）。
+    """
+    q = int(round((max(1, min(100, int(quality))) - 1) * 29 / 99))
+    return max(2, min(31, 31 - q))
+
+
+def jpeg_size(data):
+    """从 JPEG 字节里读 (宽, 高)；读不出来返回 None。
+
+    为什么要读：``X-DSH-Size`` 必须是 **JPEG 自身的像素尺寸**（客户端按它分配画布），
+    而 import / grim / win32 这条路上我们只拿到字节；scale<1 时它跟屏幕尺寸也不一样。
+    """
+    if not data or data[0] != 0xFF or data[1] != 0xD8:
+        return None
+    i, n = 2, len(data)
+    while i + 9 < n:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        seglen = int.from_bytes(data[i + 2:i + 4], "big")
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB,
+                      0xCD, 0xCE, 0xCF):
+            return (int.from_bytes(data[i + 7:i + 9], "big"),
+                    int.from_bytes(data[i + 5:i + 7], "big"))
+        if seglen <= 0:
+            return None
+        i += 2 + seglen
+    return None
+
+
+def mjpeg_part(frame: bytes, seq: int, time_ms: int, size: str, cursor) -> bytes:
+    """拼一个 MJPEG part（契约 §5.3 的逐帧头）。
+
+    逐帧头**必须**在这里带上：宿主半边是把上游字节原样透传给浏览器的，
+    没有别的地方能补这些信息。所以这四行少一个，客户端就少一样东西：
+
+    * ``X-DSH-Seq``    单调递增帧号（客户端据此丢中间帧、算源帧率）；
+    * ``X-DSH-Time``   **抓帧时刻**的 epoch 毫秒（算真实内容 fps 与变化延迟都靠它）；
+    * ``X-DSH-Size``   这一帧 JPEG 的像素尺寸（scale<1 时与屏幕尺寸不同）；
+    * ``X-DSH-Cursor`` 归一化的指针位置；拿不到指针时是 ``-1,-1``（客户端据此不画光标）。
+    """
+    if cursor:
+        pos = f"{cursor['x']:.4f},{cursor['y']:.4f}"
+    else:
+        pos = "-1,-1"
+    head = ("--frame\r\n"
+            "Content-Type: image/jpeg\r\n"
+            f"Content-Length: {len(frame)}\r\n"
+            f"X-DSH-Seq: {int(seq)}\r\n"
+            f"X-DSH-Time: {int(time_ms)}\r\n"
+            f"X-DSH-Size: {size}\r\n"
+            f"X-DSH-Cursor: {pos}\r\n"
+            "\r\n").encode("ascii")
+    return head + bytes(frame) + b"\r\n"
+
+
+class EncoderGone(RuntimeError):
+    """常驻编码进程不可用了（退出/管道断了/超时）—— 调用方重启它。"""
+
+
+class FfmpegEncoder:
+    """常驻编码进程：``rawvideo(BGRA)`` → ``mjpeg``（一路喂帧、一路取 JPEG）。
+
+    为什么常驻：0.3.4 每帧 spawn 一次 ``import -window root``（45ms/帧，而且它自己
+    还要再抓一遍 X）；常驻 ffmpeg 稳态 16-22ms/帧，首帧 100ms。
+
+    ⚠️ **必须 ``-threads 1``**：帧级多线程（默认按核数）会把**头几帧憋在内部缓冲里**，
+    实测连喂 3 帧后最坏 3 秒才吐第一张 JPEG（帧线程要攒够线程数才出帧，我的读循环
+    每次都在 3 秒 select 超时里等到 0 字节）。谁要把它"优化"成多线程，
+    用户看到的首帧就会慢到 1-3 秒 —— 这是踩过的坑，别踩第二遍。
+
+    编码进程可能死（被 OOM、被误杀、管道断了）：所有 IO 失败都抛 ``EncoderGone``，
+    由管线重启；重启仍不行就整体退回 import（慢但能用）。
+    """
+
+    def __init__(self, size, quality, scale, log_path: str) -> None:
+        self.size = (int(size[0]), int(size[1]))
+        self.quality = int(quality)
+        self.scale = float(scale)
+        self.log_path = log_path
+        self.proc = None
+        self.last_ms = 0.0
+        self.out_w, self.out_h = self._out_size()
+
+    def _out_size(self):
+        w, h = self.size
+        if self.scale >= 0.999:
+            return w, h
+        return max(2, int(round(w * self.scale)) // 2 * 2), max(2, int(round(h * self.scale)) // 2 * 2)
+
+    @property
+    def key(self):
+        return (self.size, self.quality, round(self.scale, 3))
+
+    @staticmethod
+    def available() -> bool:
+        return shutil.which("ffmpeg") is not None
+
+    def _cmd(self):
+        w, h = self.size
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+               "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", f"{w}x{h}", "-i", "-"]
+        if (self.out_w, self.out_h) != (w, h):
+            cmd += ["-vf", f"scale={self.out_w}:{self.out_h}:flags=bilinear"]
+        cmd += ["-f", "mjpeg", "-q:v", str(quality_to_qv(self.quality)), "-threads", "1", "-"]
+        return cmd
+
+    def start(self) -> bool:
+        if not self.available():
+            return False
+        try:
+            log = open(self.log_path, "ab")
+        except OSError:
+            log = subprocess.DEVNULL
+        try:
+            self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=log,
+                                         bufsize=0, start_new_session=True)
+        except Exception as exc:                     # noqa: BLE001
+            print(f"⚠ ffmpeg 起不来：{type(exc).__name__}: {exc}", flush=True)
+            return False
+        finally:
+            if log is not subprocess.DEVNULL:
+                try:
+                    log.close()
+                except OSError:
+                    pass
+        _register_spawn(self.proc)                   # 服务退出时一并收掉
+        return True
+
+    def encode(self, raw) -> bytes:
+        """喂一帧原始像素，取回一张 JPEG；失败抛 :class:`EncoderGone`。"""
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            raise EncoderGone(self._why("编码进程已经退出"))
+        t0 = time.perf_counter()
+        try:
+            # bufsize=0：bytearray 直接写进管道，不再多拷一份 6.4MB
+            proc.stdin.write(raw)
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
+            raise EncoderGone(self._why(f"写入失败 {type(exc).__name__}")) from exc
+        jpeg = self._read_jpeg()
+        self.last_ms = (time.perf_counter() - t0) * 1000.0
+        return jpeg
+
+    def _read_jpeg(self) -> bytes:
+        fd = self.proc.stdout.fileno()
+        data = bytearray()
+        deadline = time.monotonic() + ENCODE_TIMEOUT
+        while True:
+            if len(data) >= 4 and data[-2:] == b"\xff\xd9":
+                return bytes(data)
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise EncoderGone(self._why("取一帧 JPEG 超时"))
+            try:
+                ready, _w, _x = select.select([fd], [], [], left)
+            except (OSError, ValueError) as exc:
+                raise EncoderGone(self._why(f"select 失败 {type(exc).__name__}")) from exc
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 262144)
+            except OSError as exc:
+                raise EncoderGone(self._why(f"读取失败 {type(exc).__name__}")) from exc
+            if not chunk:
+                raise EncoderGone(self._why("编码进程关掉了输出"))
+            data += chunk
+
+    def _why(self, what: str) -> str:
+        tail = ""
+        try:
+            with open(self.log_path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - 400))
+                tail = fh.read().decode("utf-8", "replace").strip().splitlines()[-1][:200]
+        except (OSError, IndexError):
+            tail = ""
+        return f"{what}（ffmpeg {self.size[0]}x{self.size[1]} q={self.quality}）" + \
+               (f"：{tail}" if tail else "")
+
+    def stop(self) -> None:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        _unregister_spawn(proc)
+        _terminate_proc(proc, timeout=1.5)
+
+
+def encode_once(raw, size, quality, scale, timeout: float = 8.0):
+    """一次性编码一帧（``/snapshot?quality=&scale=`` 用）；失败返回 None。
+
+    刻意**不**复用常驻编码器：流的档位是给 /stream 用的，中途换档要重启进程，
+    一次 AI 截图就会把流的节奏打断（契约 §5.3 的流畅度不该被截图影响）。
+    代价是每次 ~60-100ms（起进程 + 编一帧），而截图本来就是低频操作。
+    """
+    if not FfmpegEncoder.available():
+        return None
+    w, h = int(size[0]), int(size[1])
+    scale = float(scale)
+    ow = max(2, int(round(w * scale)) // 2 * 2)
+    oh = max(2, int(round(h * scale)) // 2 * 2)
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+           "-f", "rawvideo", "-pix_fmt", "bgra", "-video_size", f"{w}x{h}", "-i", "-"]
+    if (ow, oh) != (w, h):
+        cmd += ["-vf", f"scale={ow}:{oh}:flags=bilinear"]
+    cmd += ["-f", "mjpeg", "-q:v", str(quality_to_qv(quality)), "-threads", "1",
+            "-frames:v", "1", "-"]
+    try:
+        proc = subprocess.run(cmd, input=raw, capture_output=True, timeout=timeout)
+    except Exception:                                # noqa: BLE001
+        return None
+    return proc.stdout if proc.returncode == 0 and proc.stdout[:2] == b"\xff\xd8" else None
+
+
+def recode_jpeg(jpeg: bytes, quality, scale):
+    """把已有 JPEG 改质量/缩放（import 路线给 /snapshot 用）；失败返回 None。"""
+    if not jpeg:
+        return None
+    args = []
+    if scale and abs(float(scale) - 1.0) > 0.001:
+        args += ["-vf", f"scale=iw*{float(scale)}:ih*{float(scale)}:flags=bilinear"]
+    if FfmpegEncoder.available():
+        cmd = (["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "mjpeg",
+                "-i", "-"] + args + ["-f", "mjpeg", "-q:v", str(quality_to_qv(quality)),
+                                     "-threads", "1", "-frames:v", "1", "-"])
+        try:
+            proc = subprocess.run(cmd, input=jpeg, capture_output=True, timeout=8)
+            if proc.returncode == 0 and proc.stdout[:2] == b"\xff\xd8":
+                return proc.stdout
+        except Exception:                            # noqa: BLE001
+            pass
+    if shutil.which("convert") is not None:
+        cmd = ["convert", "-"]
+        if scale and abs(float(scale) - 1.0) > 0.001:
+            cmd += ["-resize", f"{max(1, int(round(float(scale) * 100)))}%"]
+        cmd += ["-quality", str(int(quality)), "JPEG:-"]
+        try:
+            proc = subprocess.run(cmd, input=jpeg, capture_output=True, timeout=8)
+            if proc.returncode == 0:
+                return proc.stdout
+        except Exception:                            # noqa: BLE001
+            pass
+    return None
+
+
 def _grab_once(sess: Session) -> bytes:
     if BACKEND == "win32":
         return win_screen().grab()
@@ -1992,45 +2749,754 @@ def _grab_once(sess: Session) -> bytes:
     return proc.stdout
 
 
-def _grab_loop(sess: Session) -> None:
-    """每个会话一个抓帧线程；**没有会话就不会有它**（不会白发抓帧进程）。
+def parse_stream_config(params, current) -> tuple:
+    """校验 ``/stream-config`` 的参数 → ``(新档, 错误原因)``。
 
-    失败**必须可见**：写日志，并把最后一次错误放进 ``sess.frame_error``，
-    由 ``/state`` 与独立页面显示出来 —— 旧实现 ``except Exception: pass``，
-    画面全黑时用户和日志都无从判断是"没程序"还是"抓不到"。
+    * 只认 ``quality`` / ``fps`` / ``scale`` 三个键，**其余键一律忽略**：
+      客户端的 ``profile`` / ``reason``、查询串里的 ``k=``（令牌）都会从这里路过，
+      把未知键当错误会让"顺手打个标记"的调用直接 400。
+    * 非法值（0 / 999 / abc / null / 布尔）→ 错误 → 调用方回 400。
+      **不做"静默夹到边界"**：那会让调用方以为改成功了，而实际档位完全不是他要的。
     """
-    fails = 0
-    while not sess.closed:
-        if not sess.ensure():
-            with sess.lock:
-                sess.frame_error = "显示服务器没起来"
-            time.sleep(1.0)
+    cfg = dict(current or {"quality": DEFAULT_QUALITY, "fps": DEFAULT_FPS,
+                           "scale": DEFAULT_SCALE})
+    if params is None:
+        return cfg, ""
+    if not isinstance(params, dict):
+        return None, "body 必须是 JSON 对象"
+    for key, caster, lo, hi in (("quality", _cfg_int, MIN_QUALITY, MAX_QUALITY),
+                                ("fps", _cfg_int, MIN_FPS, MAX_FPS),
+                                ("scale", _cfg_float, MIN_SCALE, MAX_SCALE)):
+        if key not in params or params[key] is None:
             continue
+        value = caster(params[key], lo, hi)
+        if value is None:
+            return None, f"{key} 非法：期望 {lo}..{hi}，收到 {params[key]!r}"
+        cfg[key] = value
+    return cfg, ""
+
+
+def _cfg_int(value, lo, hi):
+    num = _cfg_num(value)
+    if num is None or num != int(num) or not lo <= num <= hi:
+        return None
+    return int(num)
+
+
+def _cfg_float(value, lo, hi):
+    num = _cfg_num(value)
+    if num is None or not lo <= num <= hi:
+        return None
+    return round(float(num), 3)
+
+
+def _cfg_num(value):
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num or num in (float("inf"), float("-inf")):
+        return None
+    return num
+
+
+class Pipeline:
+    """一个会话的帧管线：抓帧 → 去重 → 编码 → 广播（契约 §5.2/§5.3）。
+
+        X11Screen.grab() ──BGRA──▶ FrameDedup ──变了──▶ FfmpegEncoder ──JPEG──▶ publish
+                                     │                                            │
+                                     └─ 没变：skipped++，只可能发"仅光标"帧        └─▶ cond.notify_all()
+                                                                                     （每个 /stream 客户端一条线程）
+
+    线程模型：**一个会话一条管线线程**（它就是唯一碰 X11 连接的线程），
+    /stream 的每个客户端各自一条 HTTP 线程，靠 ``cond`` 广播拿"最新一帧"。
+    客户端慢就自然丢中间帧（永远只取最新），不会拖住管线。
+    """
+
+    def __init__(self, sess: Session) -> None:
+        self.sess = sess
+        self.cond = threading.Condition()
+        self.config = {"quality": DEFAULT_QUALITY, "fps": DEFAULT_FPS, "scale": DEFAULT_SCALE}
+        #: 自适应降档只写这里（**只降不升用户设的档**，所以 POST 的目标档不会被悄悄改掉）
+        self.auto = {"quality": None, "fps": None, "scale": None}
+        self.reason = ""
+        self.encoder = None
+        self.screen = None
+        self.dedup = FrameDedup()
+        self.seq = 0
+        self.frame = b""
+        self.frame_meta = {"seq": 0, "time": 0, "size": f"{W}x{H}", "cursor": None}
+        self.content_time_ms = 0
+        self.content_size = f"{W}x{H}"
+        self.cursor = None
+        self.cursor_at = 0.0
+        self.next_cursor = 0.0
+        self.cursor_period = 1.0 / CURSOR_FPS           # 源定了之后按源调整（见 _mode）
+        self.clients = 0
+        self.mode = "idle"
+        self.idle_fps = IDLE_FPS_SLOW
+        self.captured = self.encoded = self.skipped = self.cursor_only = 0
+        self.capture_ms = self.encode_ms = 0.0
+        self.crc = 0
+        self.sent = deque()                          # 出帧时刻（fps 窗口）
+        self.rate = deque()                          # 出帧时刻（自适应判据，2s 窗口）
+        self.sent_bytes = deque()                    # (时刻, 字节数)（bytesPerSec 窗口）
+        self.damage_times = deque()                  # damage 事件时刻（damageEvents 窗口）
+        self.last_sent_at = 0.0
+        self.last_change = 0.0
+        self.last_capture_at = 0.0
+        self.last_watch = time.time()                # 最近一次"有人在看"
+        self.last_cursor_only = 0.0
+        self.next_capture = 0.0
+        self.last_adapt = 0.0
+        self.calm_since = 0.0
+        self._damage_seen = 0
+        self._warm = 0
+        self._no_encoder = False
+        self._stop = threading.Event()
+        # 自管道：用来**立刻**打断管线线程里最长 1 秒的等待（改档/回收/新客户端）。
+        # ⚠️ 两头都必须非阻塞：读端如果是阻塞的，`while os.read(...)` 会在管道空了之后
+        #    永久阻塞在第二次读上（实测：管线抓完第一帧就再也不动了，而日志里什么都看不到）。
+        self._rfd, self._wfd = os.pipe()
+        os.set_blocking(self._rfd, False)
+        os.set_blocking(self._wfd, False)
+        self.thread = None
+        self._closed = False
+
+    # ---------------------------------------------------------------- 生命周期
+    def start(self) -> bool:
+        """起（或重起）管线线程。**同一个对象**：Seq、订阅者、档位都不受影响。"""
+        self.revive()
+        return self.thread is not None
+
+    def revive(self) -> None:
+        """线程停住了（多半是 park 在 Xlib 的 IO 错误处理器里）就再起一条。
+
+        Xvfb 被回收/被别的实例顶掉时这是唯一的自愈路径：旧线程永远停在 Xlib 里，
+        而服务不能因此把这个会话变成"永远黑屏"。**千万不要**在重起前 XCloseDisplay
+        那条旧连接 —— 对新线程来说它是"死连接上的调用"，会把新线程也 park 掉。
+        """
+        if self._closed:
+            return
+        if self.thread is not None and self.thread.is_alive():
+            return
+        if self.screen is not None:
+            self.screen = None                       # 旧连接不要了（见上面那条注释）
+            self.dedup.reset()                       # 新连接的首帧一定要发出去
+        self.thread = threading.Thread(target=_grab_loop, args=(self.sess,), daemon=True,
+                                       name=f"grab-{self.sess.sid}")
+        self.thread.start()
+
+    def stop(self, timeout: float = 1.5) -> None:
+        """让管线收手（会话回收路径）。**必须在杀 Xvfb 之前调**：
+        进程内抓帧正在跑的时候把 Xvfb 杀掉 = Xlib IO 错误 = 抓帧线程就地停住。
+        """
+        self._closed = True
+        self._stop.set()
+        self._notify()
+        thread = self.thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout)
+        self._drop_encoder(None)
+        self._close_pipe()
+
+    def _close_pipe(self) -> None:
+        for fd in (self._rfd, self._wfd):
+            try:
+                if fd is not None and fd >= 0:
+                    os.close(fd)
+            except OSError:
+                pass
+        self._rfd = self._wfd = -1
+
+    def _notify(self) -> None:
+        """打断管线线程的等待（改档 / 回收 / 有新客户端）。"""
+        fd = self._wfd
+        if fd is None or fd < 0:
+            return
         try:
-            frame = _grab_once(sess)
-            if not frame:
-                raise RuntimeError(f"{BACKEND} 抓帧返回空数据")
-        except Exception as exc:                     # noqa: BLE001
-            fails += 1
-            with sess.lock:
-                sess.frame_error = f"{type(exc).__name__}: {exc}"
-            if fails <= 3 or fails % 20 == 0:
-                print(f"[{sess.sid}] 抓帧失败（第 {fails} 次）：{sess.frame_error}"
-                      f"（缺 import/grim？）", flush=True)
-            time.sleep(min(5.0, max(GRAB_INTERVAL, GRAB_INTERVAL * fails)))
-            continue
+            os.write(fd, b"\x01")
+        except (OSError, ValueError):
+            pass
+
+    def _drain_notify(self) -> None:
+        """排空自管道（非阻塞读：管道空时立刻返回，绝不在这里等）。"""
+        fd = self._rfd
+        if fd is None or fd < 0:
+            return
+        try:
+            while os.read(fd, 64):
+                pass
+        except (BlockingIOError, OSError, ValueError):
+            pass
+
+    # ---------------------------------------------------------------- 对外接口
+    def watch(self) -> None:
+        """记一笔"有人在看"（/stream 订阅、/stats、/snapshot、/state）。
+
+        没人看时（也没有流客户端）画面再动也不按目标 fps 跑：一个没人看的会话
+        不该把 CPU 烧在编码上；`/stats` 一被采样就立刻恢复——所以观测口径不会因此变低。
+        """
+        self.last_watch = time.time()
+
+    def watched(self) -> bool:
+        return self.clients > 0 or (time.time() - self.last_watch) < 5.0
+
+    def subscribe(self) -> None:
+        with self.cond:
+            self.clients += 1
+        self.watch()
+        self._notify()
+
+    def unsubscribe(self) -> None:
+        with self.cond:
+            self.clients = max(0, self.clients - 1)
+
+    def set_config(self, cfg: dict) -> dict:
+        """用户改档：清掉自适应降档（新档位重新评估），立刻生效。"""
+        with self.cond:
+            self.config = dict(cfg)
+            for key in self.auto:
+                self.auto[key] = None
+            self.reason = ""
+            self.last_adapt = time.monotonic()       # 给新档一个冷却期再评判
+            self.calm_since = 0.0
+            self.cond.notify_all()
+        self._notify()
+        return dict(self.config)
+
+    def effective_config(self) -> dict:
+        cfg = dict(self.config)
+        for key in ("quality", "fps", "scale"):
+            auto = self.auto[key]
+            if auto is not None:
+                cfg[key] = min(cfg[key], auto)
+        return cfg
+
+    def wait_frame(self, last_seq: int, timeout: float = 0.5):
+        """等一帧（阻塞 ≤timeout）→ ``(jpeg, meta, seq)``；没有新帧时 jpeg 为 None。
+
+        新客户端（last_seq=0）会**立刻**拿到当前最新一帧，然后才是后续增量。
+        """
+        with self.cond:
+            if self.seq <= last_seq:
+                self.cond.wait(timeout)
+            if self.seq > last_seq and self.frame:
+                return self.frame, dict(self.frame_meta), self.seq
+            return None, None, last_seq
+
+    def note_sent(self, nbytes: int) -> None:
+        self.sent_bytes.append((time.time(), int(nbytes)))
+        while len(self.sent_bytes) > 4096:
+            self.sent_bytes.popleft()
+
+    def cached_cursor(self, max_age: float = 1.0):
+        """缓存里的归一化指针位置（管线每轮都刷新）；太旧返回 None。"""
+        if self.cursor is not None and (time.time() - self.cursor_at) <= max_age:
+            return dict(self.cursor)
+        return None
+
+    def stats(self) -> dict:
+        """``/stats`` 的主体（契约 §5.5 + 0.4.0 扩展字段）。"""
+        now = time.time()
+        while self.sent and now - self.sent[0] > STATS_WINDOW:
+            self.sent.popleft()
+        while self.sent_bytes and now - self.sent_bytes[0][0] > STATS_WINDOW:
+            self.sent_bytes.popleft()
+        while self.damage_times and now - self.damage_times[0] > DAMAGE_WINDOW:
+            self.damage_times.popleft()
+        cfg = self.effective_config()
+        fps = round(len(self.sent) / STATS_WINDOW, 2)
+        byps = round(sum(n for _t, n in self.sent_bytes) / STATS_WINDOW, 1)
+        return {
+            "fps": fps,
+            "captured": self.captured,
+            "encoded": self.encoded,
+            "skipped": self.skipped,
+            "bytesPerSec": byps,
+            "quality": cfg["quality"],
+            "scale": cfg["scale"],
+            "mode": self.mode,
+            "captureMs": round(self.capture_ms, 2),
+            "encodeMs": round(self.encode_ms, 2),
+            "cursor": dict(self.cursor) if self.cursor else None,
+            "reason": self.reason,
+            # ---- 0.4.0 扩展（perf 脚本与客户端状态条会用；契约 §5.5 的字段一个不少）
+            "encoder": self.encoder_name(),
+            "cursorOnly": self.cursor_only,
+            "clients": self.clients,
+            "seq": self.seq,
+            "crc": self.crc,
+            "damageEvents": len(self.damage_times),
+            "lastFrameAgeMs": (int((now - self.last_sent_at) * 1000)
+                               if self.last_sent_at else None),
+            "targetFps": cfg["fps"],
+            "idleFps": self.idle_fps,
+            "costMs": round(self.capture_ms + self.encode_ms, 2),
+            "stream": {"fps": fps, "quality": cfg["quality"], "scale": cfg["scale"],
+                       "mode": self.mode},
+        }
+
+    def encoder_name(self) -> str:
+        if self.encoder is not None:
+            return "ffmpeg"
+        if BACKEND in ("win32", "darwin"):
+            return "in-process"
+        if BACKEND == "wayland":
+            return "grim"
+        return "import"
+
+    def encode_shot(self, quality: float, scale: float):
+        """单独编一帧给 ``/snapshot``（自己的 X 连接 + 一次性编码进程）。"""
+        quality = int(quality)
+        scale = float(scale)
+        if BACKEND == "x11" and self._no_encoder is False:
+            scr = X11Screen(self.sess.display, self.sess.sid)
+            try:
+                if scr.open():
+                    raw = scr.grab()
+                    if raw is not None:
+                        jpeg = encode_once(raw, (scr.width, scr.height), quality, scale)
+                        if jpeg:
+                            return jpeg
+            except Exception:                        # noqa: BLE001
+                pass
+            finally:
+                scr.close()
+        try:
+            jpeg = _grab_once(self.sess)
+        except Exception:                            # noqa: BLE001
+            return b""
+        cfg = self.effective_config()
+        if (quality, scale) == (int(cfg["quality"]), float(cfg["scale"])):
+            return jpeg
+        return recode_jpeg(jpeg, quality, scale) or jpeg
+
+    # ---------------------------------------------------------------- 线程主体
+    def _pump(self) -> None:
+        """一轮：等变化 → 抓帧 → 去重 → 编码 → 广播（异常交给 run() 兜）。
+
+        ⚠️ **先判"到点没有"，再干别的**：XDamage 每秒能醒 60 次，如果每次都顺手做一次
+        XQueryPointer（0.3-3ms 往返），抓帧的节拍就会被一路往后推 —— 实测只有 11fps
+        （目标 15fps，而每帧实际只要 25ms）。所以指针刷新自己按 CURSOR_FPS 节流。
+        """
+        sess = self.sess
+        cfg = self.effective_config()
+        now = time.monotonic()
+        if now < self.next_capture:
+            # 还没到出帧的点：等 damage / 通知（也会按指针的节拍醒来）
+            self._wake(min(self.next_capture - now, self._cursor_wait()))
+            self._cursor_tick()
+            self._cursor_frame()
+            return
+        self._ensure_sources(cfg)
+        cfg = self.effective_config()                # _ensure_sources 可能改了档（没 ffmpeg）
+        epoch_ms = int(time.time() * 1000)
+        t0 = time.perf_counter()
+        self.last_capture_at = time.monotonic()
+        data, kind = self._capture()
+        cap_ms = (time.perf_counter() - t0) * 1000.0
+        self.captured += 1
+        changed, crc = self.dedup.check(data)
+        self.crc = crc
+        enc_ms = 0.0
+        if not changed:
+            # 内容没变：不编码、不发帧（静止带宽趋近 0）
+            self.skipped += 1
+        else:
+            jpeg, enc_ms, size = self._encode(data, kind, cfg)
+            if jpeg:
+                self.last_change = time.monotonic()
+                self._publish(jpeg, epoch_ms, size, cursor_only=False)
+        self.capture_ms = _ewma(self.capture_ms, cap_ms)
+        if enc_ms:
+            self.encode_ms = _ewma(self.encode_ms, enc_ms)
+        self._cursor_tick()
+        self._cursor_frame()
+        self._schedule(cfg)
+        self._adapt(cfg, cap_ms, enc_ms)
+
+    def run(self) -> None:
+        sess = self.sess
         fails = 0
+        print(f"[{sess.sid}] 帧管线启动（抓帧优先 XGetImage+XDamage，编码优先常驻 ffmpeg）",
+              flush=True)
+        try:
+            while not sess.closed and not self._stop.is_set():
+                try:
+                    if not sess.ensure():
+                        self._fail("显示服务器没起来")
+                        if self._stop.wait(1.0):
+                            break
+                        continue
+                    self._pump()
+                    fails = 0
+                except Exception as exc:             # noqa: BLE001
+                    fails += 1
+                    self._fail(f"{type(exc).__name__}: {exc}")
+                    self._drop_screen("抓帧失败")
+                    if self._stop.wait(min(GRAB_FAIL_MAX_BACKOFF, 0.2 * fails)):
+                        break
+        finally:
+            self._drop_encoder(None)
+            self._drop_screen(None)
+            self._close_pipe()
+
+    def _fail(self, note: str) -> None:
+        """抓帧失败**必须可见**（/state 的 frameError、日志），不再静默。"""
+        with self.sess.lock:
+            self.sess.frame_error = note
+        if note != getattr(self, "_last_fail", None):
+            self._last_fail = note
+            print(f"[{self.sess.sid}] 抓帧失败：{note}（缺 import/grim？）", flush=True)
+
+    # ---------------------------------------------------------------- 源与编码器
+    def _ensure_sources(self, cfg) -> None:
+        """让"抓帧源 + 编码器"处于一致状态：raw 抓帧必须配 ffmpeg，否则整体退回 import。"""
+        self._ensure_screen()
+        if self.screen is not None:
+            self._ensure_encoder(cfg)
+        self._mode()
+
+    def _ensure_screen(self) -> None:
+        if BACKEND != "x11" or self._no_encoder:
+            return
+        sess = self.sess
+        scr = self.screen
+        if scr is not None and scr.display != sess.display:
+            self._drop_screen("显示号变了")
+            scr = None
+        if scr is not None:
+            return
+        scr = X11Screen(sess.display, sess.sid)
+        if scr.open():
+            self.screen = scr
+            self._damage_seen = 0
+            # 空抓一帧：既把 bits_per_pixel / bytes_per_line 学到手（深屏解析要看它），
+            # 也顺便验证"这台显示的像素格式我们认得出"，认不出就当场退回 import。
+            warm = scr.grab()
+            if warm is None:
+                self._drop_screen(f"XGetImage 回来的像素格式认不出"
+                                  f"（depth={scr.depth} bpp={scr.bits_per_pixel}）"
+                                  f"→ 抓帧退回 import")
+                return
+            print(f"[{sess.sid}] 抓帧：进程内 XGetImage {scr.width}x{scr.height} "
+                  f"depth={scr.depth} bpp={scr.bits_per_pixel} "
+                  f"行跨距={scr.bytes_per_line}"
+                  + ("+XDamage 事件驱动" if scr.damage else "+定时轮询（没有 XDamage）"),
+                  flush=True)
+        else:
+            self.screen = None
+            print(f"[{sess.sid}] 抓帧退回 import（libX11 用不了；每帧一个进程，慢但能用）",
+                  flush=True)
+
+    def _ensure_encoder(self, cfg) -> None:
+        size = (self.screen.width, self.screen.height)
+        key = (size, int(cfg["quality"]), round(float(cfg["scale"]), 3))
+        enc = self.encoder
+        if enc is not None and enc.key == key:
+            return
+        if enc is not None:
+            self._drop_encoder(f"档位变了（{enc.quality}→{cfg['quality']}、"
+                               f"{enc.scale}→{cfg['scale']}）")
+        enc = FfmpegEncoder(size, cfg["quality"], cfg["scale"],
+                            os.path.join(self.sess.dir, "ffmpeg.log"))
+        if enc.start():
+            self.encoder = enc
+            # 头一两帧带着进程冷启动（实测首帧 60-100ms，稳态 20ms 上下）：
+            # 不把它算进自适应判据，否则一上来就冤枉地降一档。
+            self._warm = 2
+        else:
+            self._no_encoder = True
+            self._drop_screen("没装 ffmpeg：抓帧退回 import（每帧一个进程，慢但能用）")
+
+    def _drop_screen(self, note) -> None:
+        scr, self.screen = self.screen, None
+        if scr is not None:
+            if self._display_alive():
+                scr.close()
+            else:
+                # 那头已经没了（Xvfb 被回收/被顶掉）：XCloseDisplay 会走 Xlib 的 IO
+                # 错误处理器把**本线程** park 住，宁可漏一个 fd（罕见），
+                # 也不要把抓帧线程赔进去 —— 留着的连接由 revive() 另起线程接管。
+                print(f"[{self.sess.sid}] 显示已经没了：放弃这条 X 连接（不 close，免得"
+                      f"抓帧线程卡在 Xlib 里）", flush=True)
+        if note:
+            print(f"[{self.sess.sid}] {note}", flush=True)
+
+    def _display_alive(self) -> bool:
+        """显示还活着吗（**不碰 Xlib**，所以在"连接可能已断"时也能安全调用）。"""
+        proc = self.sess._server_proc
+        if proc is not None:
+            return proc.poll() is None
+        return True                                  # 孤儿显示：没有进程可查，当作活着
+
+    def _drop_encoder(self, note) -> None:
+        enc, self.encoder = self.encoder, None
+        if enc is not None:
+            enc.stop()
+        if note:
+            print(f"[{self.sess.sid}] {note}", flush=True)
+
+    def _mode(self) -> None:
+        """``/stats.mode``：一眼看出走的哪条路（perf 脚本按它断言）。"""
+        if self.screen is not None:
+            self.mode = "xgetimage+XDamage" if self.screen.damage else "xgetimage+poll"
+        elif BACKEND == "x11":
+            self.mode = "import"
+        elif BACKEND == "wayland":
+            self.mode = "grim"
+        else:
+            self.mode = BACKEND
+        if self.screen is None:
+            self.idle_fps = IDLE_FPS_SLOW
+            # 没有进程内指针（import/grim/win32/darwin）：xdotool 每次都要 fork/exec，
+            # 别按 5Hz 去问，1 秒一次足够（页面自己还会按需问 /state）。
+            self.cursor_period = 1.0
+        elif self.screen.damage:
+            self.idle_fps = max(1, int(round(1.0 / IDLE_TICK)))
+            self.cursor_period = 1.0 / CURSOR_FPS
+        else:
+            self.idle_fps = IDLE_FPS
+            self.cursor_period = 1.0 / CURSOR_FPS
+
+    def _capture(self):
+        """抓一帧 → ``(data, kind)``：kind=``raw``（BGRA，要编码）/``jpeg``（已经是 JPEG）。"""
+        scr = self.screen
+        if scr is not None:
+            buf = scr.grab()
+            if buf is None:
+                raise RuntimeError("XGetImage 交不出这一帧（像素格式认不出？）")
+            return buf, "raw"
+        return _grab_once(self.sess), "jpeg"
+
+    def _encode(self, data, kind, cfg):
+        """编码一帧 → ``(jpeg, encodeMs, "WxH")``。"""
+        if kind == "jpeg":
+            size = jpeg_size(data)
+            return data, 0.0, (f"{size[0]}x{size[1]}" if size else self.content_size)
+        enc = self.encoder
+        if enc is None:
+            # 走到这里说明 ffmpeg 刚刚失效：这一帧用 import 顶上，下一轮整体退回 import
+            jpeg = _grab_once(self.sess)
+            size = jpeg_size(jpeg)
+            return jpeg, 0.0, (f"{size[0]}x{size[1]}" if size else f"{W}x{H}")
+        try:
+            jpeg = enc.encode(data)
+        except EncoderGone as exc:
+            self._drop_encoder(f"编码进程异常（{exc}）→ 重启")
+            self._no_encoder = not FfmpegEncoder.available()
+            jpeg = _grab_once(self.sess)             # 这一帧先用 import 顶上
+            size = jpeg_size(jpeg)
+            return jpeg, 0.0, (f"{size[0]}x{size[1]}" if size else f"{W}x{H}")
+        self.encoded += 1
+        return jpeg, enc.last_ms, f"{enc.out_w}x{enc.out_h}"
+
+    # ---------------------------------------------------------------- 出帧
+    def _wake(self, timeout: float) -> None:
+        """睡到"有事发生"：damage 到达 / 改档 / 回收 / 超时。"""
+        if self._stop.is_set() or timeout <= 0:
+            return
+        scr = self.screen
+        if scr is not None:
+            scr.wait(timeout, extra=(self._rfd,))
+            self._count_damage(scr)
+        else:
+            self._stop.wait(timeout)
+        self._drain_notify()
+
+    def _count_damage(self, scr: X11Screen) -> None:
+        total = scr.damage_events
+        if total > self._damage_seen:
+            now = time.time()
+            for _ in range(min(total - self._damage_seen, 4096)):
+                self.damage_times.append(now)
+            self._damage_seen = total
+
+    def _read_cursor(self):
+        """归一化指针位置（0..1）；拿不到返回 None。"""
+        scr = self.screen
+        if scr is None:
+            return cursor_pos(self.sess)             # import/grim/win32/darwin：走老路
+        pos = scr.pointer()
+        if pos is None:
+            return self.cursor
+        x, y = pos
+        return {"x": round(min(1.0, max(0.0, x / max(1, scr.width))), 4),
+                "y": round(min(1.0, max(0.0, y / max(1, scr.height))), 4)}
+
+    def _cursor_wait(self) -> float:
+        """距下一次指针刷新还有多久（用来决定等待时长）。"""
+        return max(0.0, self.next_cursor - time.monotonic())
+
+    def _cursor_tick(self) -> None:
+        """刷新指针位置（按 ``cursor_period`` 节流）。
+
+        进程内 XQueryPointer 是往返调用：跟着 damage 的 60 次/秒一起做会很贵；
+        xdotool 那条回退路更贵（每次 fork/exec），所以它单独用 1 秒的节拍。
+        """
+        now = time.monotonic()
+        if now < self.next_cursor:
+            return
+        cur = self._read_cursor()
+        self.next_cursor = now + self.cursor_period
+        if cur is not None:
+            self.cursor, self.cursor_at = cur, time.time()
+
+    def _cursor_frame(self) -> None:
+        """画面没变、但指针动了：重发**缓存的那张 JPEG**（不重新编码），Seq 递增。
+
+        为什么不干脆不发：游标位置是随帧下发的（契约 §5.3），不发就等于指针冻住。
+        为什么复用缓存：重编一张一模一样的图纯属浪费 CPU（静止时那点带宽是可接受的代价，
+        而且只在指针真的动时才发，上限 CURSOR_FPS）。
+        """
+        cur = self.cursor
+        prev = self.frame_meta.get("cursor")
+        if cur is None or not self.frame or prev is None:
+            if cur is not None:
+                self.frame_meta["cursor"] = cur
+            return
+        if cur["x"] == prev["x"] and cur["y"] == prev["y"]:
+            return
+        now = time.time()
+        if now - self.last_cursor_only < 1.0 / max(1, CURSOR_FPS):
+            return
+        self.last_cursor_only = now
+        self.cursor_only += 1
+        self._publish(self.frame, self.content_time_ms, self.content_size,
+                      cursor_only=True, cursor=cur)
+
+    def _publish(self, jpeg: bytes, time_ms: int, size: str, cursor_only: bool = False,
+                 cursor=None) -> None:
+        """把一帧交给所有 /stream 客户端（广播：每个客户端线程各拿一份最新帧）。"""
+        sess = self.sess
+        if not cursor_only:
+            self.content_time_ms = int(time_ms)
+            self.content_size = size
+        if cursor is None:
+            cursor = self.cursor
+        now = time.time()
+        with self.cond:
+            self.seq += 1
+            self.frame = jpeg
+            self.frame_meta = {"seq": self.seq, "time": int(self.content_time_ms),
+                               "size": self.content_size,
+                               "cursor": dict(cursor) if cursor else None}
+            self.cond.notify_all()
+        self.last_sent_at = now
+        self.sent.append(now)
+        if not cursor_only:
+            self.rate.append(now)                    # 自适应只看真正的内容帧
+        # bytesPerSec = **上游出帧带宽**（每帧算一次，不按客户端数翻倍）：
+        # 画面静止时它是 0，这正是契约 §5.1 那条"静止带宽 ≤5KB/s"要看的数。
+        self.note_sent(len(jpeg))
         with sess.lock:
-            sess.latest = frame
+            sess.latest = jpeg
             sess.frame_count += 1
-            sess.last_frame_at = time.time()
+            sess.last_frame_at = now
             sess.frame_error = None
-        time.sleep(GRAB_INTERVAL)
+
+    def _schedule(self, cfg) -> None:
+        """下一帧的时间点：有人看且画面在动 → 目标 fps；没人看/静止 → 低频巡检。
+
+        ⚠️ 从**上一次抓帧的开始时刻**算周期，不是从"现在"算：抓帧 + 编码本身要
+        25-30ms，从"现在"算就等于每帧都白送这 30ms（实测 15fps 目标只能跑到 6.7fps，
+        因为 66ms 的等待叠上 30ms 的干活）。超时了就把时间点设在过去 → 立刻抓下一帧。
+        """
+        active = (time.monotonic() - self.last_change) < ACTIVE_HOLD
+        fps = cfg["fps"] if (active and self.watched()) else min(self.idle_fps, cfg["fps"])
+        self.next_capture = self.last_capture_at + 1.0 / max(1, fps)
+
+    # ---------------------------------------------------------------- 自适应
+    def achieved_fps(self, window: float = 2.0) -> float:
+        """最近 ``window`` 秒里真正**出帧**的速率（数据不够时返回 0 = 还不知道）。
+
+        为什么自适应判据要带上它：只看"一帧耗时"会被单帧抖动骗到
+        （实测 41ms > 40ms 预算就降了一档，而当时 15fps 跑得好好的、CPU 才 15%）。
+        "出不了目标帧数"才是"抓不动/编不过来"的直接证据。
+        """
+        now = time.time()
+        while self.rate and now - self.rate[0] > window:
+            self.rate.popleft()
+        if len(self.rate) < 4 or now - self.rate[0] < 1.0:
+            return 0.0
+        return len(self.rate) / max(0.5, now - self.rate[0])
+
+    def _adapt(self, cfg, cap_ms: float, enc_ms: float) -> None:
+        """自适应降档（契约 §5.2）：**先 fps → 再 scale → 最后 quality**；闲了再逐档回升。
+
+        判据是"一帧的实测耗时超出帧周期的预算" **且** "实际出帧数明显低于目标" ——
+        两者同时成立才算跟不上（只看耗时会被单帧抖动误伤）。
+        降档只写进 ``self.auto``（只降不升），用户 POST 的目标档永远原样保留。
+        """
+        cost = self.capture_ms + self.encode_ms
+        budget = max(8.0, 1000.0 * ADAPT_BUDGET_RATIO / max(1, cfg["fps"]))
+        achieved = self.achieved_fps()
+        behind = achieved == 0.0 or achieved < 0.8 * cfg["fps"]
+        now = time.monotonic()
+        if self._warm > 0:                           # 编码进程刚起：这几帧不作数
+            self._warm -= 1
+            self.last_adapt = now
+            return
+        if now - self.last_adapt < ADAPT_COOLDOWN:
+            return
+        if cost > budget and behind:
+            self.last_adapt = now
+            shown = f"{cost:.0f}ms/帧（目标 {cfg['fps']}fps，实际 {achieved:.1f}fps）"
+            if cfg["fps"] > MIN_FPS:
+                value = max(MIN_FPS, int(cfg["fps"] * 0.6))
+                self.auto["fps"] = value
+                self.reason = f"跟不上：{shown} → fps 降到 {value}"
+            elif cfg["scale"] > MIN_SCALE:
+                value = max(MIN_SCALE, round(cfg["scale"] - 0.25, 2))
+                self.auto["scale"] = value
+                self.reason = f"仍跟不上：{shown} → scale 降到 {value}"
+            elif cfg["quality"] > ADAPT_MIN_QUALITY:
+                value = max(ADAPT_MIN_QUALITY, cfg["quality"] - 15)
+                self.auto["quality"] = value
+                self.reason = f"仍跟不上：{shown} → quality 降到 {value}"
+            else:
+                self.reason = f"已经是最低档还是跟不上：{shown}"
+            print(f"[{self.sess.sid}] 自适应降档：{self.reason}", flush=True)
+            self._notify()                           # 档变了下轮重启编码进程
+        elif cost < budget * 0.6 and (achieved == 0.0 or achieved >= 0.9 * cfg["fps"]):
+            if not self.calm_since:
+                self.calm_since = now
+            elif now - self.calm_since >= ADAPT_RECOVER_HOLD:
+                self.calm_since = now
+                for key in ("quality", "scale", "fps"):     # 回升：先还 quality
+                    if self.auto[key] is not None:
+                        self.auto[key] = None
+                        self.reason = f"闲下来了（{cost:.0f}ms/帧）→ {key} 回升"
+                        print(f"[{self.sess.sid}] 自适应回升：{self.reason}", flush=True)
+                        self._notify()
+                        break
+        else:
+            self.calm_since = 0.0
+
+
+def _grab_loop(sess: Session) -> None:
+    """每会话一条抓帧/编码线程（没有会话就不会有它，不会白发抓帧进程）。"""
+    sess.pipe.run()
 
 
 # ---------------------------------------------------------------- 状态
 def cursor_pos(sess: Session):
-    """指针位置（**归一化 0..1**）；拿不到返回 None。"""
+    """指针位置（**归一化 0..1**）；拿不到返回 None。
+
+    0.4.0 起优先读帧管线缓存的位置（XQueryPointer，管线每轮刷新，≈50µs）——
+    旧实现每次 /state 都 spawn 一个 xdotool（+一次 X 往返），而 /state 是 2 秒一次的轮询，
+    面板开着就一直在花这个进程钱。缓存太旧（>1s，比如 import 路线）才退回 xdotool。
+    """
+    cached = sess.pipe.cached_cursor(max_age=1.0) if getattr(sess, "pipe", None) else None
+    if cached is not None:
+        return cached
     if BACKEND == "win32":
         x, y = _win_cursor()
         if x < 0 or y < 0:
@@ -2127,6 +3593,7 @@ def _session_state(sid: str, sess) -> dict:
         return base
     started = sess.ensure()
     sess.touch()                                     # 轮询 /state 也算"在用"
+    sess.pipe.watch()                                # 有人在看面板 → 别降到低频巡检
     count = window_count(sess) if started else -1
     with sess.lock:
         frame_ok = bool(sess.latest) and sess.frame_error is None
@@ -2162,6 +3629,27 @@ def display_payload(sid: str, sess) -> dict:
     return {"session": sid, "display": sess.display, "backend": BACKEND,
             "size": f"{W}x{H}", "input": input_enabled(),
             "realDesktop": real_desktop()}
+
+
+def stats_payload(sid: str, sess) -> dict:
+    """``/stats``（契约 §5.5）。``sess`` 为 None 时给默认档的零计数，**绝不创建会话**。"""
+    if sess is None:
+        return {
+            "session": sid, "ok": True, "started": False,
+            "fps": 0.0, "captured": 0, "encoded": 0, "skipped": 0, "bytesPerSec": 0.0,
+            "quality": DEFAULT_QUALITY, "scale": DEFAULT_SCALE, "mode": "idle",
+            "captureMs": 0.0, "encodeMs": 0.0, "cursor": None, "reason": "",
+            "encoder": "none", "cursorOnly": 0, "clients": 0, "seq": 0, "crc": 0,
+            "damageEvents": 0, "lastFrameAgeMs": None, "targetFps": DEFAULT_FPS,
+            "idleFps": IDLE_FPS_SLOW, "costMs": 0.0,
+            "stream": {"fps": 0.0, "quality": DEFAULT_QUALITY, "scale": DEFAULT_SCALE,
+                       "mode": "idle"},
+        }
+    sess.pipe.watch()                                # 采样即"有人在看"（别在观测时降频）
+    out = sess.pipe.stats()
+    out.update({"session": sid, "ok": True, "started": bool(sess.started),
+                "frameError": sess.frame_error})
+    return out
 
 
 def health_payload() -> dict:
@@ -2581,6 +4069,15 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(raw.decode("utf-8", "replace"))
 
+    def _query(self) -> dict:
+        """查询串 → ``{键: 值}``（同键取最后一个；``k=`` 是令牌，不参与业务）。"""
+        out = {}
+        for key, values in parse_qs(urlparse(self.path).query).items():
+            if key == "k" or not values:
+                continue
+            out[key] = values[-1]
+        return out
+
     # ------------------------------------------------------------ GET
     def do_GET(self) -> None:                        # noqa: N802 - BaseHTTPRequestHandler
         if not self._auth():
@@ -2627,8 +4124,13 @@ class Handler(BaseHTTPRequestHandler):
         if rest == "/snapshot":
             sess = session(sid)
             sess.ensure()
-            with sess.lock:
-                frame = sess.latest
+            sess.pipe.watch()
+            # ?quality=/&scale= 是**锦上添花**的参数：非法就当没给（不 400），
+            # 因为旧调用方（页面、宿主、AI 工具）不该因为多写一个参数就拿到错误。
+            params = self._query()
+            quality = _cfg_int(params.get("quality"), MIN_QUALITY, MAX_QUALITY)
+            scale = _cfg_float(params.get("scale"), MIN_SCALE, MAX_SCALE)
+            frame = sess.snapshot_jpeg(quality, scale)
             if not frame:
                 # ⚠️ **不阻塞**：旧实现最多等 5 秒（20×0.25s），而页面 130ms 拉一次，
                 #    会把宿主侧连接堆起来。没有帧就立刻 503，调用方自己重试。
@@ -2639,6 +4141,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         if rest == "/stream":
             self._stream(sid)
+            return
+        if rest == "/stats":
+            # 探测类：**不创建会话**（没有会话就给默认档的零计数）
+            self._json(200, stats_payload(sid, peek_session(sid)))
+            return
+        if rest == "/stream-config":
+            sess = peek_session(sid)
+            cfg = sess.pipe.effective_config() if sess else {
+                "quality": DEFAULT_QUALITY, "fps": DEFAULT_FPS, "scale": DEFAULT_SCALE}
+            self._json(200, {"ok": True, "session": sid, "config": cfg,
+                             "default": sess is None})
             return
         if rest == "/state":
             self._json(200, _session_state(sid, peek_session(sid)))
@@ -2658,47 +4171,50 @@ class Handler(BaseHTTPRequestHandler):
         self._error(404, f"未知路径 /s/{sid}{rest}")
 
     def _stream(self, sid: str) -> None:
-        """MJPEG 流。
+        """MJPEG 长连接（契约 §5.3）。
 
-        客户端断开时旧实现会抛 ``BrokenPipeError`` 刷栈、线程永不退出；
-        这里每次写前检查连接、写失败立刻收场。
+        每个客户端一条 HTTP 线程，但**永远只发最新一帧**（``wait_frame`` 拿的是
+        "当前最新"，不是队列）：客户端慢就自然丢中间帧，不会把延迟堆起来。
+        多个客户端同时连是**广播**（各自从同一份最新帧取），不是第一个独占。
+
+        断开要干净：写失败/对端关了立刻收场（旧实现会抛 BrokenPipeError 刷栈、
+        线程永不退出）。
         """
         sess = session(sid)
         if not sess.ensure():
             self._error(502, "显示未就绪", f"看 {sess.dir}/xvfb.log")
             return
+        pipe = sess.pipe
+        pipe.subscribe()
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")   # 反向代理别攒着这批字节
         self.end_headers()
+        seq = 0
         try:
             while not sess.closed:
                 sess.touch()
-                with sess.lock:
-                    frame = sess.latest
-                if frame:
-                    chunk = (b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                             + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
-                    if not self._write(chunk):
+                frame, meta, seq = pipe.wait_frame(seq, timeout=0.5)
+                if frame is None:
+                    # 没新帧也要定期看一眼对端还在不在（静止画面可能几分钟不发一帧）
+                    if self._peer_gone():
                         return
-                    try:
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        self.close_connection = True
-                        return
-                else:
-                    try:
-                        self.wfile.flush()
-                    except (BrokenPipeError, ConnectionResetError, OSError):
-                        self.close_connection = True
-                        return
-                if self._peer_gone():
-                    self.close_connection = True
+                    continue
+                chunk = mjpeg_part(frame, meta["seq"], meta["time"], meta["size"],
+                                  meta["cursor"])
+                if not self._write(chunk):
                     return
-                time.sleep(0.2)
+                try:
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    return
+                if self._peer_gone():
+                    return
         finally:
+            pipe.unsubscribe()
             self.close_connection = True
 
     def _peer_gone(self) -> bool:
@@ -2725,6 +4241,8 @@ class Handler(BaseHTTPRequestHandler):
             self._post_input(sid)
         elif rest == "/exec":
             self._post_exec(sid)
+        elif rest == "/stream-config":
+            self._post_stream_config(sid)
         elif rest == "/kill":
             self._post_kill(sid)
         elif rest == "/close":
@@ -2743,6 +4261,38 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, f"未知路径 /s/{sid}{rest}")
             return
         self._post_close(sid)
+
+    def _post_stream_config(self, sid: str) -> None:
+        """改档（契约 §5.2）：``POST /s/<sid>/stream-config``。
+
+        JSON body 与查询串都认（``?quality=90&fps=10``），查询串优先；
+        只认 quality/fps/scale 三个键，其余键（客户端的 profile/reason、令牌 k）忽略。
+        **非法值回 400**：静默夹到边界会让调用方以为改成功了。
+        """
+        try:
+            body = self._read_json()
+        except ValueError as exc:
+            self._error(400, f"body 不是合法 JSON：{exc}")
+            return
+        params = dict(body) if isinstance(body, dict) else {}
+        query = self._query()
+        for key in ("quality", "fps", "scale"):
+            if key in query:
+                params[key] = query[key]
+        # ⚠️ 先校验、再创建会话：非法参数不该把 Xvfb 拉起来（与 /input 的校验顺序同理）。
+        sess = peek_session(sid)
+        base = sess.pipe.config if sess else {"quality": DEFAULT_QUALITY,
+                                              "fps": DEFAULT_FPS, "scale": DEFAULT_SCALE}
+        cfg, err = parse_stream_config(params, base)
+        if err:
+            self._error(400, err, "quality 1..100、fps 1..30、scale 0.25..1.0；"
+                                  "其余键一律忽略")
+            return
+        sess = session(sid)
+        applied = sess.pipe.set_config(cfg)
+        sess.touch()
+        self._json(200, {"ok": True, "session": sid, "config": applied,
+                         "effective": sess.pipe.effective_config()})
 
     def _post_input(self, sid: str) -> None:
         try:
