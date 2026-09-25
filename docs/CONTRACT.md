@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.3.2，冻结）
+# dsh-display-panel 接口契约（v0.4.0，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
