@@ -252,6 +252,29 @@ def static_checks() -> None:
                 except Exception as exc:                              # noqa: BLE001
                     record("卡片工具：能生成彩色测试图", False, f"{type(exc).__name__}: {exc}")
 
+            # ---- 0.6.0：空闲态（鸡汤 + 插画）与手动关闭显示器
+            host_src = (ROOT / "lib" / "index.js").read_text(encoding="utf-8")
+            client_src = (ROOT / "lib" / "client.js").read_text(encoding="utf-8")
+            record("宿主：注册了 /close 路由（关闭本会话的显示器）",
+                   "${BASE_PATH}/close" in host_src and "suffix: 'close'" in host_src,
+                   "lib/index.js 的路由表")
+            record("工具：新增 display_panel_close（共 8 个工具）",
+                   "`${PREFIX}close`" in tools_src
+                   and "[status, open, sessions, run, procs, screenshot, input, close]" in tools_src,
+                   "lib/tools.js 的工具清单")
+            record("客户端：空闲态覆盖层 + 随机鸡汤 + 程序化插画",
+                   "className: 'ddp-idle'" in client_src and "const QUOTES = [" in client_src
+                   and "function paintScene(" in client_src and client_src.count("scene: '") >= 8,
+                   f"{client_src.count(chr(34) + 'scene: ' + chr(39))} 个 ——scene（含场景引用）")
+            record("客户端：能手动关闭显示器，且关掉后禁止自动重连",
+                   "'data-act': 'display-close'" in client_src
+                   and "userClosedRef" in client_src
+                   and "if (userClosedRef.current) return" in client_src,
+                   "display-close 按钮 + userClosedRef 闸门")
+            record("客户端：插画配色跟着主题深浅（跳过透明背景的误判）",
+                   "data-art-dark" in client_src and "跳过 alpha" in client_src,
+                   "isDarkTheme + data-art-dark 暗纱")
+
             m = re.search(r"接口契约（v([0-9.]+)", CONTRACT.read_text(encoding="utf-8"))
             cver = m.group(1) if m else "?"
             pver = str(pkg.get("version"))

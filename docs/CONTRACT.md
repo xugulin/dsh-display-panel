@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.5.0，冻结）
+# dsh-display-panel 接口契约（v0.6.0，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
@@ -103,6 +103,12 @@
 | POST | `P/service` | `{"action":"start"\|"stop"\|"restart"\|"status"}` → 管理显示器服务进程 |
 | POST | `P/exec?session=<sid>` | 透传 `/exec`（在会话显示上跑程序） |
 | GET | `P/events?session=<sid>` | **可选**：SSE 状态推送（没有就由客户端轮询） |
+| POST | `P/frame` / `P/stream` | 同 GET，但用 POST 拿（个别代理会把长连接的 GET 缓存掉） |
+| GET | `P/stats?session=<sid>` | 透传服务端帧管线指标（§5.5） |
+| POST | `P/stream-config?session=<sid>` | `{quality,fps,scale}` → 透传并回读生效档位 |
+| GET | `P/procs?session=<sid>` | 透传会话显示上的进程列表 |
+| POST | `P/kill?session=<sid>` | 杀掉会话显示上的某个进程（body `{pid}`） |
+| POST | `P/close?session=<sid>` | **关闭该会话的显示器**（上游 `POST /s/<sid>/close`，见 §6.0） |
 
 要点：
 
@@ -270,6 +276,17 @@ X-DSH-Cursor: <x,y 归一化 0..1>\r\n
   分辨率、以及"真实桌面/只读"警示；工具条含 适应 / 1:1 / 缩放 / 平滑 / 全屏；
   载入有骨架屏，首帧淡入，断线有明确文案；letterbox 底色用主题面色，不再写死纯黑。
 * **交互反馈**：鼠标指针画成光标精灵（不是十字线）；点击有涟漪反馈；拖拽有状态提示。
+* **空闲态必须有内容**（0.6.0）：显示器**没打开**（`/state.started === false`）或打开了但
+  **上面什么都没跑**（`started === true && windows === 0`）时，面板不得显示一片死黑 ——
+  要显示：① 说明当前情况的提示（"还没有打开" / "空闲"）；② **居中一条随机鸡汤**
+  （中英各一句 + 落款）；③ 与该句**应景的程序化插画**（8 个场景：日出/雪山/星空/海面/
+  林间/极光/云海/灯笼，配色跟随主题深浅，带轻微动效）；④ 切换与开关显示器的按钮。
+  * 插画由**面板自绘**（canvas），不占用显示器资源 —— 显示器本身仍然是真的空着，
+    所以 AI 的截图与"空闲"判定不会被这层装饰污染。这一点是刻意的，别改成往显示器上画。
+  * 鸡汤库在 `lib/client.js` 的 `QUOTES`（16 条，每条带 `scene` 与中英落款）；「换一句」随机换。
+* **手动开关显示器**（0.6.0）：面板提供「关闭显示器」（回收该会话的 Xvfb 并释放显示号）
+  与「打开显示器」。⚠️ **关掉之后禁止一切自动重连**（否则流一断就把显示又拉起来，等于关不掉）；
+  只有当**别人**把显示器重新打开（`/state.windows > 0`）时才自动恢复画面。
 * **省电**：标签页不可见（`document.visibilityState==='hidden'`）时暂停拉流并通知服务降档；
   重新可见时恢复。
 * **自适应必须是双向的**：实测跟不上可以请求降档，但**降档之后必须能自己爬回来** ——
@@ -303,6 +320,16 @@ X-DSH-Cursor: <x,y 归一化 0..1>\r\n
 
 这些脚本随 npm 包发布，用户会直接调用，所以它们的**命令行参数算对外契约**：
 改参数名/删参数要按语义化版本走（删/改 = breaking）。
+
+### 6.0 关闭显示器（0.6.0 新增的宿主路由）
+
+```
+POST /api/dsh-display-panel/close?session=<sid>    → 上游 POST /s/<sid>/close
+```
+
+回收该会话的显示器（Xvfb + 显示号）。返回上游的 JSON（`{ok, session, removed}`）。
+面板的「关闭显示器」按钮与 `display_panel_close` 工具都走它 —— 用 POST 而不是上游等价的
+DELETE，是为了在所有浏览器/curl 下行为一致（DELETE 在部分链路上 body 会被吃掉）。
 
 ### 6.1 `tools/session-wall.py` —— 实时会话墙
 
