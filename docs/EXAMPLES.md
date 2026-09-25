@@ -85,6 +85,25 @@ python3 tools/session-wall.py --file "<会话记录路径>" --dry-run
 把它挂到**另一个**会话的显示器上，就是"看着那个会话干活"的效果 ——
 适合演示，或者让旁边的屏幕显示进度。
 
+## 4. 团队看板（Agent Teams 总览）
+
+![团队看板](examples/team-board.jpg)
+
+跑着 Agent Teams 的会话，记录里有完整的团队数据（`team/member`、`team/task`、`team/message/*`），
+`tools/team-board.py` 把它们画成"作战地图"：成员每人一块独立颜色区域、任务的堆叠进度条、
+每人的任务状态与最近动态，以及一块"未配对任务"面板（lead 自己的 / 新开的任务不会消失）。
+
+```bash
+# 先看解析结果（不需要 X）
+python3 tools/team-board.py --file "<会话记录>" --dry-run
+# 画到**当前会话**的显示器上
+python3 tools/team-board.py --file "<会话记录>" --title 网盘管理_V2 --sid <sid>
+# 画到**别的**会话的显示器上：走宿主 /exec（见文首），或直接打服务的 exec 接口
+curl -s -X POST -H 'content-type: application/json' \
+  -d '{"argv":["python3","tools/team-board.py","--file","<记录>","--title","网盘管理_V2"],"wait":false}' \
+  "http://127.0.0.1:<服务端口>/s/<目标会话>/exec?k=<服务令牌>"
+```
+
 ---
 
 ## 附：这些例子里踩到的坑（都固化进工具了，改代码前先读）

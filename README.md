@@ -290,6 +290,21 @@ curl -s -X POST 'http://127.0.0.1:<DSH端口>/api/dsh-display-panel/exec?session
 | `DSH_VIEW_FORCE` | 关 | 脚本 | `1` = 允许覆盖"不是本包装的"同名单元（等价 `--force`） |
 | `PYTHON` | 自动 | 脚本 | 脚本与服务用的解释器 |
 
+## 团队看板（0.7.0）
+
+跑着 Agent Teams 的会话，可以把"作战地图"投到它自己的显示器上：成员每人一块**独立颜色**的区域、
+任务的堆叠进度条（完成/进行中/待办）、每人的任务状态与最近一次交代/回报：
+
+![团队看板](docs/examples/team-board.jpg)
+
+```bash
+python3 tools/team-board.py --file "<会话记录>" --dry-run     # 先看解析结果（不需要 X）
+python3 tools/team-board.py --file "<会话记录>" --title 网盘管理_V2   # 画到当前会话的显示器
+```
+
+成员与任务的配对规则（按 `W<n>` 编号 → 独特 ASCII 词兜底）、以及"刻意不用中文词兜底"
+的原因都写在 [docs/CONTRACT.md](docs/CONTRACT.md) §6.3。
+
 ## 空闲时不再是一片黑（0.6.x）
 
 ![空闲态：居中的随机鸡汤 + 应景插画](docs/examples/idle-quote-dark.jpg)
@@ -325,6 +340,7 @@ curl -s -X POST 'http://127.0.0.1:<DSH端口>/api/dsh-display-panel/exec?session
 | `tools/display-cards.py quote` | 生成**文字卡片**（深色渐变 + 中日韩大字，可多行 + 副标题 + 页脚） |
 | `tools/display-cards.py show` | 把任意图片**无边框全屏**铺到某台显示上（用 `ffplay`；ImageMagick 的 `display -window root` 在 Xvfb 上是静默失败的） |
 | `tools/session-wall.py` | **实时会话墙**：读会话自己的记录（zstd JSONL），把用户/助手/工具/团队事件实时动画显示到那台显示器上（`● LIVE` 脉冲点、按类型配色、底部扫描线、新事件滑入） |
+| `tools/team-board.py` | **团队看板**：把 Agent Teams 的总览画到显示器上 —— 成员（每人一个颜色分区）、任务堆叠进度条、每人的任务状态与最近动态、未配对任务 |
 
 ```bash
 # 生成一张彩色测试图并铺到当前会话的显示器上

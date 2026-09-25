@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.6.0，冻结）
+# dsh-display-panel 接口契约（v0.7.0，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
@@ -357,7 +357,23 @@ display-cards.py show FILE [--display :N] [--seconds N] [--geometry WxH]
   它在 Xvfb 上是静默失败）；
 * 依赖：`magick`（ImageMagick）；`show` 另需 `ffplay`。缺依赖时报错退出（非 0）。
 
-### 6.3 文档与示例
+### 6.3 `tools/team-board.py` —— 团队看板（Agent Teams 总览）
+
+```
+team-board.py --file <会话记录> [--title T] [--sid S] [--width W] [--height H]
+              [--fps N] [--cache DIR] [--seconds N] [--dry-run] [--json]
+```
+
+* 读同一份会话记录（`.zstd` 或未压缩 `.jsonl`），把 **Agent Teams 总览**画到显示器上：
+  成员（8 色分区）/ 任务堆叠进度条 / 每人的任务状态与最近动态 / 未配对任务面板；
+* **成员 ↔ 任务配对规则**（冻结，因为显示出来的内容依赖它）：
+  ① 按描述与任务主题里共同的 `W<n>` 编号；② 没有编号时，用描述里**独特的 ASCII 词**
+  （如 `danmu_api`）在任务主题/描述里找；③ 都没配上就归入"未配对任务"面板。
+  ⚠️ 刻意**不用中文词**兜底：像"弹幕"这种词在多个任务里都出现，配了就是错的。
+* `--dry-run` 打印人读摘要、`--json` 打印结构化结果 —— 两者都**不需要 X**（自检与 CI 用）；
+* 与 `session-wall.py` 的分工：那个是逐条事件"流水账"，这个是"作战地图"。
+
+### 6.4 文档与示例
 
 `docs/EXAMPLES.md` 记录三个真实用例（彩色测试图 / 文字卡片 / 实时会话墙）与它们的调用方式，
 含"跨会话投屏"的宿主 HTTP 调用示例。

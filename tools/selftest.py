@@ -275,6 +275,49 @@ def static_checks() -> None:
                    "data-art-dark" in client_src and "跳过 alpha" in client_src,
                    "isDarkTheme + data-art-dark 暗纱")
 
+            # ---- 0.7.0：团队看板（成员 / 任务进度 / 每人工作详情）
+            # 用一份**合成记录**喂它，断言解析与配对逻辑（纯 Python，不需要 X）。
+            try:
+                import importlib.util as _ilu3
+                import tempfile as _tf3
+                spec3 = _ilu3.spec_from_file_location("ddp_board", ROOT / "tools" / "team-board.py")
+                board_mod = _ilu3.module_from_spec(spec3)
+                spec3.loader.exec_module(board_mod)
+                fixture3 = Path(_tf3.mkdtemp(prefix="ddp-board-")) / "t.jsonl"
+                fixture3.write_text("\n".join([
+                    '{"type":"team/member","time":1,"data":{"member":'
+                    '{"id":"m1","name":"t1-playui","description":"W3 播放界面：重构"}}}',
+                    '{"type":"team/member","time":2,"data":{"member":'
+                    '{"id":"m2","name":"t9-misc","description":"部署 danmu_api 真服务"}}}',
+                    '{"type":"team/task","time":3,"data":{"task":'
+                    '{"id":"task-3","revision":1,"subject":"W3 播放界面：重构","status":"pending"}}}',
+                    '{"type":"team/task","time":4,"data":{"task":'
+                    '{"id":"task-3","revision":2,"subject":"W3 播放界面：重构","status":"completed"}}}',
+                    '{"type":"team/task","time":5,"data":{"task":'
+                    '{"id":"task-10","revision":1,"subject":"W11 真实弹幕数据夹具（danmu_api）","status":"in_progress"}}}',
+                    '{"type":"team/message/queued","time":6,"data":{"message":'
+                    '{"id":"x1","senderId":"m1","senderName":"t1-playui","targetId":"lead",'
+                    '"content":[{"type":"text","text":"我这边做完了"}]}}}',
+                    '{"type":"assistant/message","time":7,"data":{}}',
+                ]), encoding="utf-8")
+                b = board_mod.read_board(str(fixture3))
+                names = [m["name"] for m in b["members"]]
+                record("团队看板：解析出成员并按 W 编号排序", names == ["t1-playui", "t9-misc"], f"members={names}")
+                record("团队看板：任务取**最新修订**（task-3 pending → completed）",
+                       b["counts"].get("completed", 0) == 1 and b["total"] == 2, f"counts={b['counts']} total={b['total']}")
+                m1 = [m for m in b["members"] if m["name"] == "t1-playui"][0]
+                record("团队看板：成员与任务按 W 编号配对",
+                       [t["id"] for t in m1["tasks"]] == ["task-3"], f"tasks={[t['id'] for t in m1['tasks']]}")
+                m2 = [m for m in b["members"] if m["name"] == "t9-misc"][0]
+                record("团队看板：没有 W 编号时用独特 ASCII 词兜底配对",
+                       [t["id"] for t in m2["tasks"]] == ["task-10"], f"tasks={[t['id'] for t in m2['tasks']]}")
+                record("团队看板：每人最近动态带方向（他发的 → / 发给他的 ←）",
+                       m1["latest"].startswith("→ t1-playui") and "做完了" in m1["latest"], m1["latest"][:60])
+                record("团队看板：统计活动量与近一分钟活跃度",
+                       b["activity"] >= 1 and "lastTime" in b, f"activity={b['activity']} recent={b['recentPerMin']}")
+            except Exception as exc:                                  # noqa: BLE001
+                record("团队看板：解析器可用", False, f"{type(exc).__name__}: {exc}")
+
             m = re.search(r"接口契约（v([0-9.]+)", CONTRACT.read_text(encoding="utf-8"))
             cver = m.group(1) if m else "?"
             pver = str(pkg.get("version"))

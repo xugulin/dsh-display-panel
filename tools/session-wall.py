@@ -89,6 +89,31 @@ def _clip(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def read_records(path: str) -> list[dict]:
+    """整份解压 + 解析成记录列表（团队看板这类"要原始字段"的用法读它）。"""
+    if path.endswith(".zstd"):
+        try:
+            from compression import zstd  # Python 3.14 stdlib
+            with open(path, "rb") as fh:
+                raw = zstd.decompress(fh.read())
+        except ImportError:          # 老 Python：退回系统 zstdcat
+            with open(path, "rb") as fh:
+                raw = subprocess.run(["zstdcat"], stdin=fh, capture_output=True).stdout
+    else:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    out = []
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:            # noqa: BLE001
+            continue
+    return out
+
+
 def read_events(path: str) -> tuple[list[dict], dict]:
     """整份解压 + 解析 → 事件列表（时间升序）。返回 (events, meta)。"""
     if path.endswith(".zstd"):
@@ -336,6 +361,10 @@ class X:
 
     def put(self, ptr: ctypes.c_void_p, w: int, h: int, x: int = 0, y: int = 0) -> None:
         self.lib.XPutImage(self.dpy, self.win, self.gc, ptr, 0, 0, x, y, w, h)
+
+    def put_rect(self, ptr: ctypes.c_void_p, x: int, y: int, w: int, h: int) -> None:
+        """从整幅画布图像里把一个小矩形**复位**回窗口（动画覆盖前的擦除；XPutImage 支持源偏移）。"""
+        self.lib.XPutImage(self.dpy, self.win, self.gc, ptr, x, y, x, y, w, h)
 
     def rect(self, x: int, y: int, w: int, h: int, rgb: int) -> None:
         self.lib.XSetForeground(self.dpy, self.gc, rgb)
