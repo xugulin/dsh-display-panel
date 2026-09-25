@@ -1,11 +1,11 @@
-{"event": "READY", "t": 1790312695.0718207, "pid": 753603, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 2097153, "label": "baseline-0.3.4-key"}
-{"t": 1790312695.0723293, "seq": 0, "src": "init"}
-{"t": 1790312695.122872, "seq": 0, "src": "expose"}
-{"t": 1790312695.3309062, "seq": 1, "src": "key"}
-{"t": 1790312695.487331, "seq": 2, "src": "key"}
-{"t": 1790312696.4372838, "seq": 3, "src": "key"}
-{"t": 1790312697.3895469, "seq": 4, "src": "key"}
-{"t": 1790312698.3422933, "seq": 5, "src": "key"}
-{"t": 1790312699.3072686, "seq": 6, "src": "key"}
-{"t": 1790312700.2488067, "seq": 7, "src": "key"}
-{"event": "DONE", "t": 1790312701.2595742, "seq": 7, "flips": 9, "reason": "signal:SIGTERM", "parent": 732548, "pgid": 753603}
+{"event": "READY", "t": 1790312787.3760023, "pid": 811892, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 2097153, "label": "baseline-0.3.4-key"}
+{"t": 1790312787.3764849, "seq": 0, "src": "init"}
+{"t": 1790312787.4271033, "seq": 0, "src": "expose"}
+{"t": 1790312787.5604196, "seq": 1, "src": "key"}
+{"t": 1790312787.9091582, "seq": 2, "src": "key"}
+{"t": 1790312788.9021623, "seq": 3, "src": "key"}
+{"t": 1790312789.8224936, "seq": 4, "src": "key"}
+{"t": 1790312790.7792041, "seq": 5, "src": "key"}
+{"t": 1790312791.7538774, "seq": 6, "src": "key"}
+{"t": 1790312792.693973, "seq": 7, "src": "key"}
+{"event": "DONE", "t": 1790312793.749583, "seq": 7, "flips": 9, "reason": "signal:SIGTERM", "parent": 791820, "pgid": 811892}

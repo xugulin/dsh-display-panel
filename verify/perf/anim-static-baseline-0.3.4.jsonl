@@ -1,4 +1,4 @@
-{"event": "READY", "t": 1790312702.4027479, "pid": 758090, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 2097153, "label": "baseline-0.3.4"}
-{"t": 1790312702.4031355, "seq": 0, "src": "init"}
-{"t": 1790312702.4535022, "seq": 0, "src": "expose"}
-{"event": "DONE", "t": 1790312724.5787055, "seq": 0, "flips": 2, "reason": "signal:SIGTERM", "parent": 732548, "pgid": 758090}
+{"event": "READY", "t": 1790312794.8835843, "pid": 816117, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 2097153, "label": "baseline-0.3.4"}
+{"t": 1790312794.8838859, "seq": 0, "src": "init"}
+{"t": 1790312794.9342344, "seq": 0, "src": "expose"}
+{"event": "DONE", "t": 1790312817.0784087, "seq": 0, "flips": 2, "reason": "signal:SIGTERM", "parent": 791820, "pgid": 816117}

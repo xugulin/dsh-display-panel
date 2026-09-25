@@ -1,0 +1,1245 @@
+{
+  "tool": "tools/perf-panel.mjs",
+  "label": "steady15",
+  "startedAt": "2026-09-25T05:26:15.998Z",
+  "options": {
+    "url": "http://127.0.0.1:19601/?token=***",
+    "serviceOnly": false,
+    "baselineService": false,
+    "viewer": null,
+    "port": 8503,
+    "home": "/home/xgl/python/DSH插件/.verify/perf-home",
+    "attach": false,
+    "session": "perf1",
+    "seconds": 60,
+    "animFps": 20,
+    "label": "steady15",
+    "shots": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/shots",
+    "json": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/steady15.json",
+    "phases": [
+      "fps"
+    ],
+    "adversarial": false,
+    "adversarialOnly": false,
+    "streamFps": 15,
+    "keep": false,
+    "headless": true,
+    "timeout": 30000,
+    "viewerPath": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+    "logDir": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf"
+  },
+  "host": {
+    "cpus": 8,
+    "platforms": "linux"
+  },
+  "code": {
+    "service": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "sha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "frozenBaseline": false
+    },
+    "host": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/index.js",
+      "sha256": "7bcc1f022c6ae0f8ea947aac8c5db18d9fc9f5c9f2bc1448e966a96b77790381",
+      "frozenBaseline": false
+    },
+    "client": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/client.js",
+      "sha256": "8ed186dcdab28b23b825ea1bcbb342ad0a37dca60b40890fa70fcd6bfa71b1fa",
+      "frozenBaseline": false
+    },
+    "anim": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/tools/perf-anim.py",
+      "sha256": "947e8d512c92fb1c7c4c6149e767808f7bf2eaa341a6639ca1ffcba97ac1c5e9"
+    },
+    "baseline": {
+      "service": "fd1823cde14bd7d256eb0a63dcae66195e22073a4f8491ead8425bbaf11bd2f4",
+      "host": "c99fe484fba92f13500f7e3de61b018b49e0713980a94558c8331e76a66e72e0",
+      "client": "66644e53cd724fb01e107cb4dbbae80be73f6e4917d1a6c813c94304f860aa15"
+    },
+    "git": {
+      "head": "6abc60805d748c8f242ba6baeb94c899d9141931",
+      "subject": "docs(contract): §5.5 冻结 /stats 字段名（idle/fpsCap/fpsActual/userFps/costMs…），供 perf 脚本断言",
+      "dirty": [
+        "M service/dsh-display-viewer.py",
+        " M service/selfcheck.py",
+        " M tools/perf-panel.mjs",
+        " M verify/PERF-REPORT.md",
+        " M verify/perf/anim-fps-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-key-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-lat-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-static-baseline-0.3.4.jsonl",
+        " M verify/perf/baseline-0.3.4.json",
+        "?? verify/perf/adversarial.json",
+        "?? verify/perf/anim-browser-adversarial.jsonl",
+        "?? verify/perf/anim-browser-adversarial.jsonl.heal",
+        "?? verify/perf/anim-browser-fps60.jsonl",
+        "?? verify/perf/anim-browser-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-browser-laneB-smoke.jsonl",
+        "?? verify/perf/anim-fps-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-key-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-lat-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-static-improved-0.4.0.jsonl",
+        "?? verify/perf/fps60.json",
+        "?? verify/perf/improved-0.4.0.json",
+        "?? verify/perf/laneB-smoke.json",
+        "?? verify/perf/shots/"
+      ]
+    }
+  },
+  "targets": {
+    "contentFps": {
+      "min": 15,
+      "unit": "fps",
+      "name": "内容 fps（去重后）",
+      "baseline": 2
+    },
+    "latencyP50": {
+      "max": 150,
+      "unit": "ms",
+      "name": "变化延迟 p50",
+      "baseline": 600
+    },
+    "bytesStatic": {
+      "max": 5120,
+      "unit": "B/s",
+      "name": "静止画面带宽",
+      "baseline": 51200
+    },
+    "serviceCpuDynamic": {
+      "max": 25,
+      "unit": "%",
+      "name": "服务单核 CPU（动态）",
+      "baseline": null
+    },
+    "serviceCpuStatic": {
+      "max": 2,
+      "unit": "%",
+      "name": "服务单核 CPU（静止）",
+      "baseline": null
+    }
+  },
+  "checks": [
+    {
+      "key": "contentFps",
+      "name": "内容 fps（去重后）",
+      "value": 14.833086115231414,
+      "target": "≥15fps",
+      "ok": false,
+      "gap": "0.2fps 之差",
+      "note": "去重后内容帧率（客户端 canvas（lane B））",
+      "baseline": 2
+    },
+    {
+      "key": "latencyP50",
+      "name": "变化延迟 p50",
+      "value": 142.38134765625,
+      "target": "≤150ms",
+      "ok": true,
+      "gap": null,
+      "note": "X 侧画面变化 → 画出来（客户端 canvas（lane B））",
+      "baseline": 600
+    },
+    {
+      "key": "bytesStatic",
+      "name": "静止画面带宽",
+      "value": 277.72870452159134,
+      "target": "≤5120B/s",
+      "ok": true,
+      "gap": null,
+      "note": "静止画面带宽（客户端实收）",
+      "baseline": 51200
+    },
+    {
+      "key": "serviceCpuDynamic",
+      "name": "服务单核 CPU（动态）",
+      "value": 16.816386393560105,
+      "target": "≤25%",
+      "ok": true,
+      "gap": null,
+      "note": "服务进程单核 CPU（动态 15fps 档）",
+      "baseline": null
+    },
+    {
+      "key": "serviceCpuStatic",
+      "name": "服务单核 CPU（静止）",
+      "value": 0.9499841669305511,
+      "target": "≤2%",
+      "ok": true,
+      "gap": null,
+      "note": "服务进程单核 CPU（静止）",
+      "baseline": null
+    }
+  ],
+  "error": null,
+  "service": {
+    "port": 8503,
+    "home": "/home/xgl/python/DSH插件/.verify/perf-home",
+    "started": false,
+    "health": {
+      "ok": true,
+      "service": "dsh-display-viewer",
+      "version": "0.3.4",
+      "backend": "x11",
+      "size": "1600x1000",
+      "input": true,
+      "realDesktop": false,
+      "port": 8503,
+      "pid": 1165348,
+      "sessions": 2,
+      "missing": [],
+      "idleMinutes": 30,
+      "home": "/home/xgl/python/DSH插件/.verify/perf-home"
+    },
+    "viewer": "service/dsh-display-viewer.py"
+  },
+  "laneS": {
+    "streamConfig": {
+      "requested": {
+        "quality": 70,
+        "fps": 15,
+        "scale": 1
+      },
+      "status": 200,
+      "applied": {
+        "ok": true,
+        "session": "perf1",
+        "config": {
+          "quality": 70,
+          "fps": 15,
+          "scale": 1
+        },
+        "effective": {
+          "quality": 70,
+          "fps": 15,
+          "scale": 1
+        }
+      },
+      "note": "服务接受 stream-config"
+    },
+    "provenance": {
+      "pid": 1165348,
+      "startedAt": "2026-09-25T05:15:53.960Z",
+      "cmdline": "python3 /home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "file": "service/dsh-display-viewer.py",
+      "fileMtime": "2026-09-25T05:22:02.508Z",
+      "fileSha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "fileNewerThanProcess": true,
+      "note": "⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它"
+    },
+    "pids": {
+      "service": 1165348,
+      "xvfb": [
+        1316307
+      ],
+      "display": ":315"
+    },
+    "phases": {
+      "dynamic": {
+        "seconds": 60.001,
+        "framesSent": 890,
+        "contentFrames": 890,
+        "sentFps": 14.833086115231414,
+        "contentFps": 14.833086115231414,
+        "bytes": 26314228,
+        "bytesPerSec": 438563.157280712,
+        "avgFrameBytes": 29566.54831460674,
+        "maxFrameBytes": 31255,
+        "warmupExcludedSec": 8,
+        "steady": {
+          "contentFps": 14.922789946347187,
+          "bytesPerSec": 441364.28145612584,
+          "seconds": 52.001
+        },
+        "animFlips": 1195,
+        "animFps": 19.91633472775454,
+        "serverStats": {
+          "fps": 15,
+          "fpsCap": 15,
+          "fpsActual": 15,
+          "userFps": 15,
+          "idle": false,
+          "captured": 1306,
+          "encoded": 953,
+          "skipped": 353,
+          "bytesPerSec": 443841.3,
+          "quality": 70,
+          "scale": 1,
+          "mode": "xgetimage+XDamage",
+          "captureMs": 5.05,
+          "encodeMs": 16.56,
+          "cursor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "reason": "",
+          "encoder": "ffmpeg",
+          "cursorOnly": 0,
+          "clients": 1,
+          "seq": 953,
+          "crc": 803616290,
+          "damageEvents": 780,
+          "lastFrameAgeMs": 4,
+          "targetFps": 15,
+          "idleFps": 1,
+          "damageAgoMs": 58,
+          "costMs": 21.61,
+          "stream": {
+            "fps": 15,
+            "fpsCap": 15,
+            "quality": 70,
+            "scale": 1,
+            "mode": "xgetimage+XDamage"
+          },
+          "session": "perf1",
+          "ok": true,
+          "started": true,
+          "frameError": null
+        },
+        "cpuPct": {
+          "1165348": 15.999733337777702,
+          "1316307": 5.2332461125647916,
+          "1572780": 0.7833202779953666,
+          "animator": 0.7833202779953666,
+          "xvfbSum": 5.2332461125647916
+        },
+        "streamHeadersSeen": true,
+        "jpegMagicOk": true,
+        "contentType": "multipart/x-mixed-replace; boundary=frame",
+        "streamStatus": 200,
+        "streamError": null,
+        "streamRetries": 0,
+        "firstFrameWaitMs": -98,
+        "animExit": {
+          "readyT": 1790313977.188491,
+          "doneT": null,
+          "aliveSec": null,
+          "reason": null,
+          "flips": null,
+          "drawErrs": 0
+        },
+        "animator": {
+          "pid": 1572780,
+          "display": ":315",
+          "fallbackExec": false,
+          "log": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/anim-fps-steady15.jsonl"
+        }
+      }
+    },
+    "metrics": {
+      "contentFps": 14.833086115231414,
+      "sentFps": 14.833086115231414,
+      "serverStatsFps": 15,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": 438563.157280712,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": 15.999733337777702,
+      "serviceCpuStatic": null
+    }
+  },
+  "laneB": {
+    "url": "http://127.0.0.1:19601/?token=U5zGZ2FJyRO_JsDA2UUUQYPGTdX46Ni-tcXo9Z2Z3uY",
+    "session": "session-7677f4fe-5aeb-4712-966f-aa0869a4455f",
+    "uiUrl": "http://127.0.0.1:19601/",
+    "panelOpened": true,
+    "phases": {
+      "dynamic": {
+        "clientBadges": [
+          "实时画面",
+          "传输 流式",
+          "后端 x11",
+          "显示 :244",
+          "1600x1000",
+          "14.9 fps",
+          "延迟 39ms",
+          "档位 自动",
+          "构建 2026-09-25b · viewer 0.3.4",
+          "会话 session-7677f4fe-5aeb-4712-966f-aa0869a4455f",
+          "档位"
+        ],
+        "warmupExcludedSec": 8,
+        "steady": {
+          "contentFps": 14.922789946347187,
+          "seconds": 52.001,
+          "changes": 776
+        },
+        "seconds": 60.001,
+        "canvasChanges": 890,
+        "contentFps": 14.833086115231414,
+        "probeSamples": 3645,
+        "probeFps": 60.74898751687472,
+        "probeKind": "canvas",
+        "probeErrors": 0,
+        "animFlips": 1199,
+        "animFps": 19.98300028332861,
+        "panelBytesPerSec": 441113.4647755871,
+        "allBytesPerSec": 441113.4647755871,
+        "bytesByPath": {
+          "/api/dsh-display-panel/state": 13514,
+          "/api/dsh-display-panel/stream": 26450591,
+          "/api/dsh-display-panel/info": 3144
+        },
+        "serviceCpuPct": 16.816386393560105,
+        "browserCpuPct": null,
+        "rendererCpuPct": null,
+        "browserProcCount": null,
+        "browserProcTypes": null,
+        "serverStats": {
+          "fps": 14.67,
+          "fpsCap": 15,
+          "fpsActual": 14.67,
+          "userFps": 15,
+          "idle": false,
+          "captured": 930,
+          "encoded": 893,
+          "skipped": 36,
+          "bytesPerSec": 436053,
+          "quality": 70,
+          "scale": 1,
+          "mode": "xgetimage+XDamage",
+          "captureMs": 4.02,
+          "encodeMs": 16.08,
+          "captureMaxMs": 12.4,
+          "encodeMaxMs": 26,
+          "cursor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "reason": "",
+          "encoder": "ffmpeg",
+          "cursorOnly": 0,
+          "clients": 1,
+          "seq": 893,
+          "crc": 4258315933,
+          "damageEvents": 780,
+          "lastFrameAgeMs": 68,
+          "targetFps": 15,
+          "idleFps": 1,
+          "damageAgoMs": 50,
+          "costMs": 20.1,
+          "stream": {
+            "fps": 14.67,
+            "fpsCap": 15,
+            "quality": 70,
+            "scale": 1,
+            "mode": "xgetimage+XDamage"
+          },
+          "session": "session-7677f4fe-5aeb-4712-966f-aa0869a4455f",
+          "ok": true,
+          "started": true,
+          "frameError": null,
+          "service": {
+            "running": true,
+            "port": 8505,
+            "managed": true,
+            "backend": "x11",
+            "size": "1600x1000",
+            "version": "0.3.4",
+            "pid": 1470637,
+            "sessions": 2,
+            "legacy": false,
+            "autoStart": true
+          }
+        },
+        "serverStatsStatus": 200
+      },
+      "latency": {
+        "n": 14,
+        "pulses": 14,
+        "p50": 142.38134765625,
+        "p95": 972.3640991210935,
+        "pairs": [
+          {
+            "seq": 1,
+            "tFlip": 1790314123461.1711,
+            "latencyMs": 705.828857421875,
+            "diff": 2263
+          },
+          {
+            "seq": 2,
+            "tFlip": 1790314124071.1736,
+            "latencyMs": 95.826416015625,
+            "diff": 2263
+          },
+          {
+            "seq": 3,
+            "tFlip": 1790314124681.1675,
+            "latencyMs": 1368.83251953125,
+            "diff": 2267
+          },
+          {
+            "seq": 4,
+            "tFlip": 1790314125291.119,
+            "latencyMs": 758.881103515625,
+            "diff": 2267
+          },
+          {
+            "seq": 5,
+            "tFlip": 1790314125901.2202,
+            "latencyMs": 148.77978515625,
+            "diff": 2267
+          },
+          {
+            "seq": 6,
+            "tFlip": 1790314126511.1326,
+            "latencyMs": 138.867431640625,
+            "diff": 2264
+          },
+          {
+            "seq": 7,
+            "tFlip": 1790314127121.1047,
+            "latencyMs": 145.895263671875,
+            "diff": 2263
+          },
+          {
+            "seq": 8,
+            "tFlip": 1790314127731.159,
+            "latencyMs": 151.841064453125,
+            "diff": 2264
+          },
+          {
+            "seq": 9,
+            "tFlip": 1790314128341.0942,
+            "latencyMs": 158.90576171875,
+            "diff": 2263
+          },
+          {
+            "seq": 10,
+            "tFlip": 1790314128951.1191,
+            "latencyMs": 48.880859375,
+            "diff": 2264
+          },
+          {
+            "seq": 11,
+            "tFlip": 1790314129561.2297,
+            "latencyMs": 71.770263671875,
+            "diff": 2263
+          },
+          {
+            "seq": 12,
+            "tFlip": 1790314130171.1306,
+            "latencyMs": 94.869384765625,
+            "diff": 2264
+          },
+          {
+            "seq": 13,
+            "tFlip": 1790314130781.1177,
+            "latencyMs": 101.88232421875,
+            "diff": 2264
+          },
+          {
+            "seq": 14,
+            "tFlip": 1790314131391.123,
+            "latencyMs": 128.876953125,
+            "diff": 2263
+          }
+        ],
+        "probeStream": {
+          "status": 200,
+          "contentType": "multipart/x-mixed-replace; boundary=frame",
+          "frames": 15,
+          "bytes": 418077,
+          "error": null,
+          "hasFrameHeaders": true,
+          "sampleHeader": {
+            "content-type": "image/jpeg",
+            "content-length": "19102",
+            "x-dsh-seq": "897",
+            "x-dsh-time": "1790314121752",
+            "x-dsh-size": "1600x1000",
+            "x-dsh-cursor": "0.5000,0.5000"
+          },
+          "p50": 99.8721923828125,
+          "p95": 941.3640991210935,
+          "serverAgeP50": 24
+        },
+        "clientOverheadP50": 42.5091552734375,
+        "clientOverheadComparable": true
+      },
+      "keyLatency": {
+        "n": 6,
+        "p50": 115.078125,
+        "p95": 157.2879638671875,
+        "details": [
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314134490.4797,
+            "inputPathMs": 25.479736328125,
+            "postMs": 58,
+            "latencyMs": 158.520263671875
+          },
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314135430.7488,
+            "inputPathMs": 6.748779296875,
+            "postMs": 7,
+            "latencyMs": 102.251220703125
+          },
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314136339.8389,
+            "inputPathMs": 6.8388671875,
+            "postMs": 48,
+            "latencyMs": 77.1611328125
+          },
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314137289.095,
+            "inputPathMs": 7.094970703125,
+            "postMs": 7,
+            "latencyMs": 127.905029296875
+          },
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314138197.3228,
+            "inputPathMs": 7.32275390625,
+            "postMs": 48,
+            "latencyMs": 101.67724609375
+          },
+          {
+            "inputStatus": 200,
+            "tFlip": 1790314139147.409,
+            "inputPathMs": 7.408935546875,
+            "postMs": 8,
+            "latencyMs": 153.591064453125
+          }
+        ],
+        "inputPathP50": 7.2088623046875
+      },
+      "static": {
+        "seconds": 60.001,
+        "canvasChanges": 0,
+        "contentFps": 0,
+        "panelBytesPerSec": 277.72870452159134,
+        "allBytesPerSec": 277.72870452159134,
+        "bytesByPath": {
+          "/api/dsh-display-panel/state": 13520,
+          "/api/dsh-display-panel/info": 3144
+        },
+        "serviceCpuPct": 0.9499841669305511,
+        "rendererCpuPct": null,
+        "browserCpuPct": null,
+        "serverStats": {
+          "fps": 0,
+          "fpsCap": 8,
+          "fpsActual": 0,
+          "userFps": 8,
+          "idle": true,
+          "captured": 1177,
+          "encoded": 923,
+          "skipped": 254,
+          "bytesPerSec": 0,
+          "quality": 50,
+          "scale": 0.75,
+          "mode": "xgetimage+XDamage",
+          "captureMs": 2.91,
+          "encodeMs": 11.93,
+          "captureMaxMs": 16.3,
+          "encodeMaxMs": 28.3,
+          "cursor": {
+            "x": 0.5,
+            "y": 0.5
+          },
+          "reason": "空闲（无变化）",
+          "encoder": "ffmpeg",
+          "cursorOnly": 0,
+          "clients": 2,
+          "seq": 923,
+          "crc": 1654949213,
+          "damageEvents": 0,
+          "lastFrameAgeMs": 62639,
+          "targetFps": 8,
+          "idleFps": 1,
+          "damageAgoMs": null,
+          "costMs": 14.85,
+          "stream": {
+            "fps": 0,
+            "fpsCap": 8,
+            "quality": 50,
+            "scale": 0.75,
+            "mode": "xgetimage+XDamage"
+          },
+          "session": "session-7677f4fe-5aeb-4712-966f-aa0869a4455f",
+          "ok": true,
+          "started": true,
+          "frameError": null,
+          "service": {
+            "running": true,
+            "port": 8505,
+            "managed": true,
+            "backend": "x11",
+            "size": "1600x1000",
+            "version": "0.3.4",
+            "pid": 1470637,
+            "sessions": 2,
+            "legacy": false,
+            "autoStart": true
+          }
+        },
+        "serverStatsStatus": 200
+      }
+    },
+    "service": {
+      "pid": 1470637,
+      "port": 8505,
+      "version": "0.3.4",
+      "managed": true,
+      "backend": "x11",
+      "size": "1600x1000",
+      "provenance": {
+        "pid": 1470637,
+        "startedAt": "2026-09-25T05:23:40.760Z",
+        "cmdline": "python3 /home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+        "file": "service/dsh-display-viewer.py",
+        "fileMtime": "2026-09-25T05:22:02.508Z",
+        "fileSha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+        "fileNewerThanProcess": false,
+        "note": "进程启动后文件未再改动（文件 sha256 可信）"
+      }
+    },
+    "metrics": {
+      "contentFps": 14.833086115231414,
+      "sentFps": 14.67,
+      "serverStatsFps": 14.67,
+      "latencyP50": 142.38134765625,
+      "latencyP95": 972.3640991210935,
+      "bytesPerSecDynamic": 441113.4647755871,
+      "bytesPerSecStatic": 277.72870452159134,
+      "serviceCpuDynamic": 16.816386393560105,
+      "serviceCpuStatic": 0.9499841669305511,
+      "rendererCpuDynamic": null,
+      "browserCpuDynamic": null
+    },
+    "pluginHttp": [
+      {
+        "ms": 17410,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 17652,
+        "path": "/api/dsh-display-panel/stream",
+        "status": 200
+      },
+      {
+        "ms": 17736,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 20435,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 20456,
+        "path": "/api/dsh-display-panel/stream",
+        "status": 200
+      },
+      {
+        "ms": 20506,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 22643,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 22695,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 23503,
+        "path": "/api/dsh-display-panel/stream-config",
+        "status": 200
+      },
+      {
+        "ms": 23514,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 26568,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 29648,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 30458,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 32728,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 35786,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 38848,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 40485,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 41860,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 44913,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 47980,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 50493,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 51011,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 54096,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 57147,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 60218,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 60497,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 63275,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 66327,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 69381,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 70502,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 72444,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 75497,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 78549,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 80508,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 81566,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 83655,
+        "path": "/api/dsh-display-panel/stats",
+        "status": 200
+      },
+      {
+        "ms": 83778,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      },
+      {
+        "ms": 83846,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 84577,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 84672,
+        "path": "/api/dsh-display-panel/stream",
+        "status": 200
+      },
+      {
+        "ms": 86452,
+        "path": "/api/dsh-display-panel/stream-config",
+        "status": 200
+      },
+      {
+        "ms": 87595,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 90519,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 90604,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 93666,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 94328,
+        "path": "/api/dsh-display-panel/procs",
+        "status": 200
+      },
+      {
+        "ms": 94440,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      },
+      {
+        "ms": 94490,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 96551,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 96675,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 97459,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 98409,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 99317,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 99683,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 100266,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 100523,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 101175,
+        "path": "/api/dsh-display-panel/input",
+        "status": 200
+      },
+      {
+        "ms": 102733,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 103285,
+        "path": "/api/dsh-display-panel/procs",
+        "status": 200
+      },
+      {
+        "ms": 103397,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      },
+      {
+        "ms": 103445,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 105785,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 108835,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 110528,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 111843,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 114906,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 117956,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 120535,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 120966,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 124015,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 127064,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 130133,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 130539,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 133187,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 136236,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 139285,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 140551,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 142335,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 145384,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 148435,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 150556,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 151445,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 154494,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 157544,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 160560,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 160593,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 163644,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 166698,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 167262,
+        "path": "/api/dsh-display-panel/stats",
+        "status": 200
+      },
+      {
+        "ms": 167329,
+        "path": "/api/dsh-display-panel/procs",
+        "status": 200
+      },
+      {
+        "ms": 167445,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      }
+    ],
+    "pageErrors": []
+  },
+  "summary": {
+    "laneS": {
+      "contentFps": 14.833086115231414,
+      "sentFps": 14.833086115231414,
+      "serverStatsFps": 15,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": 438563.157280712,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": 15.999733337777702,
+      "serviceCpuStatic": null
+    },
+    "laneB": {
+      "contentFps": 14.833086115231414,
+      "sentFps": 14.67,
+      "serverStatsFps": 14.67,
+      "latencyP50": 142.38134765625,
+      "latencyP95": 972.3640991210935,
+      "bytesPerSecDynamic": 441113.4647755871,
+      "bytesPerSecStatic": 277.72870452159134,
+      "serviceCpuDynamic": 16.816386393560105,
+      "serviceCpuStatic": 0.9499841669305511,
+      "rendererCpuDynamic": null,
+      "browserCpuDynamic": null
+    },
+    "failed": [
+      "contentFps"
+    ],
+    "pass": false
+  },
+  "finishedAt": "2026-09-25T05:30:05.531Z",
+  "log": [
+    "",
+    "── lane S（服务端，端口 8503，session=perf1） ───────────────────────────────",
+    "服务版本 0.3.4 backend=x11 size=1600x1000 pid=1165348",
+    "会话显示 :315 （1600x1000）",
+    "stream-config → HTTP 200 {\"ok\":true,\"session\":\"perf1\",\"config\":{\"quality\":70,\"fps\":15,\"scale\":1},\"effective\":{\"quality\":70,\"fps\":15,\"scale\":1}}",
+    "进程取证：pid=1165348 启动于 2026-09-25T05:15:53.960Z；⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它",
+    "CPU 采样对象：service=1165348 xvfb=1316307 (CLK_TCK=100)",
+    "动态窗口 60.0s：发帧 890（14.8/s） 内容帧 890（**14.83 fps**） 带宽 428.3KB/s 平均帧 28.9KB",
+    "        稳态（丢掉前 8s 爬坡）：内容帧 **14.92 fps**、带宽 431.0KB/s",
+    "        靶画面实际变化 19.91633472775454 fps；服务端 /stats fps=15 captured=1306 encoded=953 skipped=353 bytesPerSec=443841.3 mode=xgetimage+XDamage",
+    "        CPU：服务 16.00%｜Xvfb 5.23%｜靶程序 0.78%",
+    "",
+    "── lane B（客户端，Playwright + 真 Brave） ────────────────────────────────",
+    "面板已打开 session=session-7677f4fe-5aeb-4712-966f-aa0869a4455f",
+    "探针已挂在 CANVAS 1210x682（kind=canvas）",
+    "面板用的服务：pid=1470637 port=8505 version=0.3.4 managed=true",
+    "        取证：进程启动后文件未再改动（文件 sha256 可信）",
+    "动态窗口 60.0s：canvas 内容帧 890（**14.83 fps**，稳态（丢掉前 8s）**14.92 fps**，rAF 采样 3645 次/surface=canvas）；靶画面 1199（20.0 fps）",
+    "        客户端实收面板字节 430.8KB/s（全页 430.8KB/s）；/stats fps=14.67 bytesPerSec=436053 mode=xgetimage+XDamage quality=70 fps_cfg=14.67",
+    "        CPU：服务 16.82%｜渲染进程 —｜Brave 全树 —",
+    "        面板自报：实时画面 | 传输 流式 | 后端 x11 | 显示 :244 | 1600x1000 | 14.9 fps | 延迟 39ms | 档位 自动 | 构建 2026-09-25b · viewer 0.3.4 | 会话 session-7677f4fe-5aeb-4712-966f-aa0869a4455f | 档位",
+    "变化延迟（X 画面变化 → canvas 画出来，n=14/14）：p50 **142.4ms** p95 972.4ms",
+    "        独立流观察同一条流：p50 99.9ms（HTTP 200，帧头 有（X-DSH-Time）→ 抓帧→到达 p50 24.0ms）；与 canvas 的差 ≈ 42.5ms（可相减）",
+    "按键注入延迟（/input → 画面变化 → canvas，n=6）：p50 115.1ms p95 157.3ms；其中输入链路 p50 7.2ms",
+    "静止窗口 60.0s：canvas 变化 0 次（0.00 fps）；客户端实收面板字节 **0.3KB/s**；/stats.bytesPerSec=0",
+    "        CPU：服务 0.95%｜渲染进程 —",
+    "",
+    "── 判定（契约 §5.1 验收线） ─────────────────────────────────────────────────",
+    "口径：客户端 canvas（lane B）",
+    "",
+    "指标                              基线(0.3.4)      目标        实测            结论",
+    "────────────────────────────────────────────────────────────────────────────────────────",
+    "内容 fps（去重后）                  2fps           ≥15        14.83fps       FAIL（0.2fps 之差）",
+    "变化延迟 p50                     600ms          ≤150       142.38ms       PASS",
+    "静止画面带宽                       50.0KB/s       ≤5120      0.3KB/s        PASS",
+    "服务单核 CPU（动态）                 —              ≤25        16.82%         PASS",
+    "服务单核 CPU（静止）                 —              ≤2         0.95%          PASS",
+    "",
+    "❌ 未达 §5.1：内容 fps（去重后） 14.83（目标 ≥15fps，0.2fps 之差）"
+  ]
+}

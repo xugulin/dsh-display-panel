@@ -1,0 +1,682 @@
+{
+  "tool": "tools/perf-panel.mjs",
+  "label": "adversarial",
+  "startedAt": "2026-09-25T05:22:54.030Z",
+  "options": {
+    "url": "http://127.0.0.1:19601/?token=***",
+    "serviceOnly": false,
+    "baselineService": false,
+    "viewer": null,
+    "port": 8503,
+    "home": "/home/xgl/python/DSH插件/.verify/perf-home",
+    "attach": false,
+    "session": "perf1",
+    "seconds": 10,
+    "animFps": 20,
+    "label": "adversarial",
+    "shots": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/shots",
+    "json": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf/adversarial.json",
+    "phases": [],
+    "adversarial": true,
+    "adversarialOnly": true,
+    "streamFps": 15,
+    "keep": false,
+    "headless": true,
+    "timeout": 30000,
+    "viewerPath": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+    "logDir": "/home/xgl/python/DSH插件/dsh-display-panel/verify/perf"
+  },
+  "host": {
+    "cpus": 8,
+    "platforms": "linux"
+  },
+  "code": {
+    "service": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "sha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "frozenBaseline": false
+    },
+    "host": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/index.js",
+      "sha256": "7bcc1f022c6ae0f8ea947aac8c5db18d9fc9f5c9f2bc1448e966a96b77790381",
+      "frozenBaseline": false
+    },
+    "client": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/lib/client.js",
+      "sha256": "8ed186dcdab28b23b825ea1bcbb342ad0a37dca60b40890fa70fcd6bfa71b1fa",
+      "frozenBaseline": false
+    },
+    "anim": {
+      "path": "/home/xgl/python/DSH插件/dsh-display-panel/tools/perf-anim.py",
+      "sha256": "947e8d512c92fb1c7c4c6149e767808f7bf2eaa341a6639ca1ffcba97ac1c5e9"
+    },
+    "baseline": {
+      "service": "fd1823cde14bd7d256eb0a63dcae66195e22073a4f8491ead8425bbaf11bd2f4",
+      "host": "c99fe484fba92f13500f7e3de61b018b49e0713980a94558c8331e76a66e72e0",
+      "client": "66644e53cd724fb01e107cb4dbbae80be73f6e4917d1a6c813c94304f860aa15"
+    },
+    "git": {
+      "head": "469161d0c2e6a7ecbc1c005e1d9edc8ac9345325",
+      "subject": "tune: 默认/自动档 fps 15→20（验收线 ≥15 需要余量）；契约同步",
+      "dirty": [
+        "M service/dsh-display-viewer.py",
+        " M service/selfcheck.py",
+        " M tools/perf-panel.mjs",
+        " M verify/PERF-REPORT.md",
+        " M verify/perf/anim-fps-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-key-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-lat-baseline-0.3.4.jsonl",
+        " M verify/perf/anim-static-baseline-0.3.4.jsonl",
+        " M verify/perf/baseline-0.3.4.json",
+        "?? verify/perf/anim-browser-fps60.jsonl",
+        "?? verify/perf/anim-browser-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-browser-laneB-smoke.jsonl",
+        "?? verify/perf/anim-fps-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-key-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-lat-improved-0.4.0.jsonl",
+        "?? verify/perf/anim-static-improved-0.4.0.jsonl",
+        "?? verify/perf/fps60.json",
+        "?? verify/perf/improved-0.4.0.json",
+        "?? verify/perf/laneB-smoke.json",
+        "?? verify/perf/shots/"
+      ]
+    }
+  },
+  "targets": {
+    "contentFps": {
+      "min": 15,
+      "unit": "fps",
+      "name": "内容 fps（去重后）",
+      "baseline": 2
+    },
+    "latencyP50": {
+      "max": 150,
+      "unit": "ms",
+      "name": "变化延迟 p50",
+      "baseline": 600
+    },
+    "bytesStatic": {
+      "max": 5120,
+      "unit": "B/s",
+      "name": "静止画面带宽",
+      "baseline": 51200
+    },
+    "serviceCpuDynamic": {
+      "max": 25,
+      "unit": "%",
+      "name": "服务单核 CPU（动态）",
+      "baseline": null
+    },
+    "serviceCpuStatic": {
+      "max": 2,
+      "unit": "%",
+      "name": "服务单核 CPU（静止）",
+      "baseline": null
+    }
+  },
+  "checks": [
+    {
+      "key": "contentFps",
+      "name": "内容 fps（去重后）",
+      "value": null,
+      "target": "≥15fps",
+      "ok": null,
+      "gap": null,
+      "note": "去重后内容帧率（客户端 canvas（lane B））",
+      "baseline": 2
+    },
+    {
+      "key": "latencyP50",
+      "name": "变化延迟 p50",
+      "value": null,
+      "target": "≤150ms",
+      "ok": null,
+      "gap": null,
+      "note": "X 侧画面变化 → 画出来（客户端 canvas（lane B））",
+      "baseline": 600
+    },
+    {
+      "key": "bytesStatic",
+      "name": "静止画面带宽",
+      "value": null,
+      "target": "≤5120B/s",
+      "ok": null,
+      "gap": null,
+      "note": "未测",
+      "baseline": 51200
+    },
+    {
+      "key": "serviceCpuDynamic",
+      "name": "服务单核 CPU（动态）",
+      "value": null,
+      "target": "≤25%",
+      "ok": null,
+      "gap": null,
+      "note": "服务进程单核 CPU（动态 15fps 档）",
+      "baseline": null
+    },
+    {
+      "key": "serviceCpuStatic",
+      "name": "服务单核 CPU（静止）",
+      "value": null,
+      "target": "≤2%",
+      "ok": null,
+      "gap": null,
+      "note": "服务进程单核 CPU（静止）",
+      "baseline": null
+    }
+  ],
+  "error": null,
+  "service": {
+    "port": 8503,
+    "home": "/home/xgl/python/DSH插件/.verify/perf-home",
+    "started": false,
+    "health": {
+      "ok": true,
+      "service": "dsh-display-viewer",
+      "version": "0.3.4",
+      "backend": "x11",
+      "size": "1600x1000",
+      "input": true,
+      "realDesktop": false,
+      "port": 8503,
+      "pid": 1165348,
+      "sessions": 2,
+      "missing": [],
+      "idleMinutes": 30,
+      "home": "/home/xgl/python/DSH插件/.verify/perf-home"
+    },
+    "viewer": "service/dsh-display-viewer.py"
+  },
+  "laneS": {
+    "streamConfig": {
+      "requested": {
+        "quality": 70,
+        "fps": 15,
+        "scale": 1
+      },
+      "status": 200,
+      "applied": {
+        "ok": true,
+        "session": "perf1",
+        "config": {
+          "quality": 70,
+          "fps": 15,
+          "scale": 1
+        },
+        "effective": {
+          "quality": 70,
+          "fps": 15,
+          "scale": 1
+        }
+      },
+      "note": "服务接受 stream-config"
+    },
+    "provenance": {
+      "pid": 1165348,
+      "startedAt": "2026-09-25T05:15:53.960Z",
+      "cmdline": "python3 /home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+      "file": "service/dsh-display-viewer.py",
+      "fileMtime": "2026-09-25T05:22:02.508Z",
+      "fileSha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+      "fileNewerThanProcess": true,
+      "note": "⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它"
+    },
+    "pids": {
+      "service": 1165348,
+      "xvfb": [
+        1316307
+      ],
+      "display": ":315"
+    },
+    "phases": {},
+    "metrics": {
+      "contentFps": null,
+      "sentFps": null,
+      "serverStatsFps": null,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": null,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": null,
+      "serviceCpuStatic": null
+    }
+  },
+  "laneB": {
+    "url": "http://127.0.0.1:19601/?token=U5zGZ2FJyRO_JsDA2UUUQYPGTdX46Ni-tcXo9Z2Z3uY",
+    "session": "session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7",
+    "uiUrl": "http://127.0.0.1:19601/",
+    "panelOpened": true,
+    "phases": {
+      "adversarial": {
+        "extremeConfig": {
+          "request": {
+            "quality": 1,
+            "fps": 1,
+            "scale": 0.25
+          },
+          "status": 200,
+          "applied": {
+            "ok": true,
+            "session": "session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7",
+            "config": {
+              "quality": 1,
+              "fps": 1,
+              "scale": 0.25
+            },
+            "effective": {
+              "quality": 1,
+              "fps": 1,
+              "scale": 0.25
+            },
+            "service": {
+              "running": true,
+              "port": 8504,
+              "managed": true,
+              "backend": "x11",
+              "size": "1600x1000",
+              "version": "0.3.4",
+              "pid": 1165527,
+              "sessions": 3,
+              "legacy": false,
+              "autoStart": true
+            }
+          },
+          "stats": {
+            "fps": 8,
+            "fpsCap": 8,
+            "fpsActual": 8,
+            "userFps": 8,
+            "idle": false,
+            "captured": 134,
+            "encoded": 94,
+            "skipped": 40,
+            "bytesPerSec": 226982,
+            "quality": 50,
+            "scale": 0.75,
+            "mode": "xgetimage+XDamage",
+            "captureMs": 3.62,
+            "encodeMs": 13.51,
+            "cursor": {
+              "x": 0.5,
+              "y": 0.5
+            },
+            "reason": "",
+            "encoder": "ffmpeg",
+            "cursorOnly": 0,
+            "clients": 1,
+            "seq": 94,
+            "crc": 3540420953,
+            "damageEvents": 390,
+            "lastFrameAgeMs": 100,
+            "targetFps": 8,
+            "idleFps": 1,
+            "damageAgoMs": 8,
+            "costMs": 17.12,
+            "stream": {
+              "fps": 8,
+              "fpsCap": 8,
+              "quality": 50,
+              "scale": 0.75,
+              "mode": "xgetimage+XDamage"
+            },
+            "session": "session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7",
+            "ok": true,
+            "started": true,
+            "frameError": null,
+            "service": {
+              "running": true,
+              "port": 8504,
+              "managed": true,
+              "backend": "x11",
+              "size": "1600x1000",
+              "version": "0.3.4",
+              "pid": 1165527,
+              "sessions": 3,
+              "legacy": false,
+              "autoStart": true
+            }
+          },
+          "contentFps": 5.499541704857929,
+          "canvasNonBlack": {
+            "w": 1210,
+            "h": 682,
+            "nonblack": 731949,
+            "total": 825220
+          },
+          "downsized": true,
+          "usable": true
+        },
+        "restartHeal": {
+          "actionStatus": 200,
+          "response": "{\"ok\":true,\"service\":{\"running\":true,\"port\":8504,\"managed\":true,\"backend\":\"x11\",\"size\":\"1600x1000\",\"version\":\"0.3.4\",\"pid\":1470320,\"sessions\":1,\"legacy\":false,\"autoStart\":true},\"input\":{\"enabled\":true,\"realDesktop\":false},\"missing\":[],\"home\":\"/home/xgl/python/DSH插件/.verify/perf-home\",\"viewer\":{\"log\"",
+          "recoveredAfterMs": 1002,
+          "canvas": {
+            "nonblack": 132,
+            "total": 825220
+          },
+          "reAnim": {
+            "status": 200,
+            "pid": 1473057,
+            "display": ":212"
+          },
+          "note": "判定前重新放了会动的内容（服务重启会连带收掉旧靶程序）"
+        },
+        "twoTabs": {
+          "page1": {
+            "kind": "canvas",
+            "changes": 181
+          },
+          "page2": {
+            "kind": "canvas",
+            "changes": 59,
+            "samples": 360,
+            "surface": "CANVAS 1210x682"
+          },
+          "page2Errors": [],
+          "sameUrl": "http://127.0.0.1:19601/"
+        },
+        "hostRestart": {
+          "skipped": true,
+          "why": "宿主重启需要外部重启 DSH 进程；由报告手工核对（脚本内不重启别人的宿主）"
+        }
+      }
+    },
+    "service": {
+      "pid": 1165527,
+      "port": 8504,
+      "version": "0.3.4",
+      "managed": true,
+      "backend": "x11",
+      "size": "1600x1000",
+      "provenance": {
+        "pid": 1165527,
+        "startedAt": "2026-09-25T05:15:54.220Z",
+        "cmdline": "python3 /home/xgl/python/DSH插件/dsh-display-panel/service/dsh-display-viewer.py",
+        "file": "service/dsh-display-viewer.py",
+        "fileMtime": "2026-09-25T05:22:02.508Z",
+        "fileSha256": "4e251186e1644a1a9f65101d442712962ece57e24a81e3ce949807556d5893c6",
+        "fileNewerThanProcess": true,
+        "note": "⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它"
+      }
+    },
+    "metrics": {
+      "contentFps": null,
+      "sentFps": null,
+      "serverStatsFps": null,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": null,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": null,
+      "serviceCpuStatic": null,
+      "rendererCpuDynamic": null,
+      "browserCpuDynamic": null
+    },
+    "pluginHttp": [
+      {
+        "ms": 17190,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 17490,
+        "path": "/api/dsh-display-panel/stream",
+        "status": 200
+      },
+      {
+        "ms": 17558,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 20610,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 22425,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 22475,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 23285,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 23620,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 26611,
+        "path": "/api/dsh-display-panel/stream-config",
+        "status": 200
+      },
+      {
+        "ms": 26686,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 27206,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 29737,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 32203,
+        "path": "/api/dsh-display-panel/stream-config",
+        "status": 200
+      },
+      {
+        "ms": 32750,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 35802,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 37215,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 38854,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 41909,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 42649,
+        "path": "/api/dsh-display-panel/stats",
+        "status": 200
+      },
+      {
+        "ms": 42757,
+        "path": "/api/dsh-display-panel/stream-config",
+        "status": 200
+      },
+      {
+        "ms": 44961,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 46337,
+        "path": "/api/dsh-display-panel/stream",
+        "status": 200
+      },
+      {
+        "ms": 46362,
+        "path": "/api/dsh-display-panel/service",
+        "status": 200
+      },
+      {
+        "ms": 47224,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 48016,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 50443,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 51029,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 51586,
+        "path": "/api/dsh-display-panel/procs",
+        "status": 200
+      },
+      {
+        "ms": 51718,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      },
+      {
+        "ms": 51772,
+        "path": "/api/dsh-display-panel/exec",
+        "status": 200
+      },
+      {
+        "ms": 54105,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 57190,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 57246,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 60242,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 63304,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 66356,
+        "path": "/api/dsh-display-panel/state",
+        "status": 200
+      },
+      {
+        "ms": 67282,
+        "path": "/api/dsh-display-panel/info",
+        "status": 200
+      },
+      {
+        "ms": 67642,
+        "path": "/api/dsh-display-panel/procs",
+        "status": 200
+      },
+      {
+        "ms": 67763,
+        "path": "/api/dsh-display-panel/kill",
+        "status": 200
+      }
+    ],
+    "pageErrors": []
+  },
+  "summary": {
+    "laneS": {
+      "contentFps": null,
+      "sentFps": null,
+      "serverStatsFps": null,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": null,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": null,
+      "serviceCpuStatic": null
+    },
+    "laneB": {
+      "contentFps": null,
+      "sentFps": null,
+      "serverStatsFps": null,
+      "latencyP50": null,
+      "latencyP95": null,
+      "bytesPerSecDynamic": null,
+      "bytesPerSecStatic": null,
+      "serviceCpuDynamic": null,
+      "serviceCpuStatic": null,
+      "rendererCpuDynamic": null,
+      "browserCpuDynamic": null
+    },
+    "failed": [],
+    "pass": false
+  },
+  "finishedAt": "2026-09-25T05:24:03.028Z",
+  "log": [
+    "",
+    "── lane S（服务端，端口 8503，session=perf1） ───────────────────────────────",
+    "服务版本 0.3.4 backend=x11 size=1600x1000 pid=1165348",
+    "会话显示 :315 （1600x1000）",
+    "stream-config → HTTP 200 {\"ok\":true,\"session\":\"perf1\",\"config\":{\"quality\":70,\"fps\":15,\"scale\":1},\"effective\":{\"quality\":70,\"fps\":15,\"scale\":1}}",
+    "进程取证：pid=1165348 启动于 2026-09-25T05:15:53.960Z；⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它",
+    "CPU 采样对象：service=1165348 xvfb=1316307 (CLK_TCK=100)",
+    "",
+    "── lane B（客户端，Playwright + 真 Brave） ────────────────────────────────",
+    "面板已打开 session=session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7",
+    "探针已挂在 CANVAS 1210x682（kind=canvas）",
+    "面板用的服务：pid=1165527 port=8504 version=0.3.4 managed=true",
+    "        取证：⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它",
+    "（--adversarial-only：跳过测量阶段，只跑对抗性检查）",
+    "",
+    "── 对抗性检查 ───────────────────────────────────────────────────────────",
+    "极档 quality=1/fps=1/scale=0.25：HTTP 200 applied={\"ok\":true,\"session\":\"session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7\",\"config\":{\"quality\":1,\"fps\":1,\"scale\":0.25},\"effective\":{\"quality\":1,\"fps\":1,\"scale\":0.25},\"service\":{\"running\":true,\"port\":8504,\"managed\":true,\"backend\":\"x11\",\"size\":\"1600x1000\",\"version\":\"0.3.4\",\"pid\":1165527,\"sessions\":3,\"legacy\":false,\"autoStart\":true}}",
+    "        /stats={\"fps\":8,\"fpsCap\":8,\"fpsActual\":8,\"userFps\":8,\"idle\":false,\"captured\":134,\"encoded\":94,\"skipped\":40,\"bytesPerSec\":226982,\"quality\":50,\"scale\":0.75,\"mode\":\"xgetimage+XDamage\",\"captureMs\":3.62,\"encodeMs\":13.51,\"cursor\":{\"x\":0.5,\"y\":0.5},\"reason\":\"\",\"encoder\":\"ffmpeg\",\"cursorOnly\":0,\"clients\":1,\"seq\":94,\"crc\":3540420953,\"damageEvents\":390,\"lastFrameAgeMs\":100,\"targetFps\":8,\"idleFps\":1,\"damageAgoMs\":8,\"costMs\":17.12,\"stream\":{\"fps\":8,\"fpsCap\":8,\"quality\":50,\"scale\":0.75,\"mode\":\"xgetimage+XDamage\"},\"session\":\"session-2dbfb520-0ab3-4f53-ad4d-d280c932c6c7\",\"ok\":true,\"started\":true,\"frameError\":null,\"service\":{\"running\":true,\"port\":8504,\"managed\":true,\"backend\":\"x11\",\"size\":\"1600x1000\",\"version\":\"0.3.4\",\"pid\":1165527,\"sessions\":3,\"legacy\":false,\"autoStart\":true}}",
+    "        面板可用性：contentFps=5.50 非黑像素=731949/825220 → 可用（画面仍在动）",
+    "服务重启（宿主 /service action=restart）：HTTP 200 {\"ok\":true,\"service\":{\"running\":true,\"port\":8504,\"managed\":true,\"backend\":\"x11\",\"size\":\"1600x1000\",\"version\":\"0.3.4\",\"pid\":1470320,\"sessions\":1,\"legacy\":false,\"autoStart\":true},\"input\":{\"enabled\":true",
+    "        重启后重新放会动的内容：exec HTTP 200 pid=1473057 display=:212",
+    "        自愈：画面重新变化用时 1002ms；canvas 非黑 132/825220",
+    "双标签：tab1 canvas changes=181｜tab2 canvas changes=59 (surface=CANVAS 1210x682) → ✅ 两个标签都在动",
+    "",
+    "── 判定（契约 §5.1 验收线） ─────────────────────────────────────────────────",
+    "口径：客户端 canvas（lane B）",
+    "",
+    "指标                              基线(0.3.4)      目标        实测            结论",
+    "────────────────────────────────────────────────────────────────────────────────────────",
+    "内容 fps（去重后）                  2fps           ≥15        未测             未测",
+    "变化延迟 p50                     600ms          ≤150       未测             未测",
+    "静止画面带宽                       50.0KB/s       ≤5120      未测             未测",
+    "服务单核 CPU（动态）                 —              ≤25        未测             未测",
+    "服务单核 CPU（静止）                 —              ≤2         未测             未测",
+    "",
+    "⚠️ 本轮**没有取到任何有效指标**（全是\"未测\"）——这不是\"达标\"，是\"没测成\"，看上面的报错"
+  ]
+}

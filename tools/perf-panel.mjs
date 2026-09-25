@@ -70,8 +70,15 @@ const PLAYWRIGHT = process.env.DSH_PERF_PLAYWRIGHT
   || '/home/xgl/deepseek-harness/node_modules/.pnpm/playwright@1.61.1/node_modules/playwright/index.mjs'
 const BROWSER = process.env.DSH_PERF_BROWSER || '/opt/brave.com/brave-origin-beta/brave'
 
-/** 我允许自己碰的端口（别人的服务一律不碰：8099/8100/19387/8501/8502/8521/19399/19501）。 */
-const MY_PORTS = new Set([8503, 8504, 19601])
+/**
+ * 我允许自己碰的端口（别人的服务一律不碰：8099/8100/19387/8501/8502/8521/19399/19501）。
+ *
+ * 2026-09-25 终版（0.4.0 冻结）复核：8503/8504/19601 已被**上一轮遗留的实例**占着，
+ * 那些进程的启动时刻早于冻结文件的 mtime（即"跑着的不是冻结版"），所以终版这一轮
+ * 换到自己的隔离端口组，绝不与遗留实例/队友的测量互相污染：
+ *   8513 = 终版服务（宿主托管）  8514 = 冻结 0.3.4 基线服务  19611 = 我的隔离 DSH 宿主
+ */
+const MY_PORTS = new Set([8503, 8504, 19601, 8513, 8514, 19611])
 
 // ------------------------------------------------------------------ 参数
 const argv = process.argv.slice(2)
@@ -97,6 +104,8 @@ const opts = {
   json: arg('--json'),
   phases: arg('--phases', 'fps,latency,static').split(',').map((s) => s.trim()).filter(Boolean),
   adversarial: flag('--adversarial'),
+  adversarialOnly: flag('--adversarial-only'),
+  streamFps: Number(arg('--stream-fps', '15')),
   keep: flag('--keep'),
   headless: arg('--headless', '1') !== '0',
   timeout: Number(arg('--timeout', '30000')),
@@ -240,7 +249,13 @@ async function ensureService() {
     const h = tk ? await probeService(opts.port, tk) : null
     if (h) return { port: opts.port, token: tk, health: h, started: true, child, home: opts.home, log: logPath }
   }
-  throw new Error(`服务起不来，看 ${logPath}`)
+  // 端口被别人占着是最常见的原因（例如隔离实例的宿主把服务拉到了同一个端口，
+  // 或者上一个测量没退干净）—— 直接把日志尾部和提示一起抛出来，别让人去猜。
+  let tail = ''
+  try { tail = fs.readFileSync(logPath, 'utf8').split('\n').slice(-8).join('\n') } catch { /* 没日志 */ }
+  const busy = /address already in use|被占用|改用/i.test(tail)
+  throw new Error(`服务起不来（${opts.port}）：看 ${logPath}\n${tail}`
+    + (busy ? `\n提示：端口 ${opts.port} 被别的服务占着（八成正被隔离实例的宿主使用）→ 换一个自己的端口：--service-port 或先停掉那个实例` : ''))
 }
 
 async function serviceExec(svc, sid, argvList, { wait = false, cwd = REPO, timeoutMs = 30000 } = {}) {
@@ -540,6 +555,36 @@ function findProcs(needles) {
   return out
 }
 
+/**
+ * 进程取证：**跑着的进程**与**磁盘上的文件**是两件事。
+ * 队友一直在改文件，而服务进程是启动时把代码读进内存的 —— 只记文件 sha256 会说谎。
+ * 这里用 /proc/<pid>/stat 的 starttime（+ /proc/stat 的 btime）算出进程启动时刻，
+ * 再和文件 mtime 比：文件比进程新 → 声明"这一轮量的代码 ≠ 文件当前内容"。
+ */
+function procStartMs(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const startTicks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19])
+    const btime = Number((fs.readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)/m) || [])[1])
+    if (!Number.isFinite(startTicks) || !Number.isFinite(btime)) return null
+    return (btime + startTicks / CLK_TCK) * 1000
+  } catch { return null }
+}
+function provenance(pid, filePath) {
+  if (!pid) return null
+  const started = procStartMs(pid)
+  let mtime = null
+  try { mtime = fs.statSync(filePath).mtimeMs } catch { /* 文件不在 */ }
+  let cmdline = null
+  try { cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() } catch { /* 进程没了 */ }
+  return { pid, startedAt: started ? new Date(started).toISOString() : null, cmdline,
+    file: path.relative(REPO, filePath), fileMtime: mtime ? new Date(mtime).toISOString() : null,
+    fileSha256: fileSha(filePath), fileNewerThanProcess: !!(started && mtime && mtime > started + 1000),
+    note: started && mtime && mtime > started + 1000
+      ? '⚠️ 文件在进程启动之后又被改过：进程里跑的是旧内容，文件 sha256 不代表它'
+      : '进程启动后文件未再改动（文件 sha256 可信）' }
+}
+
 // ------------------------------------------------------------------ 判定（§5.1）
 const TARGETS = {
   contentFps: { min: 15, unit: 'fps', name: '内容 fps（去重后）', baseline: 2 },
@@ -571,14 +616,16 @@ async function laneService(svc, report) {
 
   const display = (await httpJson(`http://127.0.0.1:${svc.port}/s/${sid}/display?k=${svc.token}`)).json
   say(`会话显示 ${display?.display} （${display?.size}）`)
-  const configured = await serviceStreamConfig(svc, sid, { quality: 70, fps: 15, scale: 1 })
+  const configured = await serviceStreamConfig(svc, sid, { quality: 70, fps: opts.streamFps, scale: 1 })
   report.laneS.streamConfig = {
-    requested: { quality: 70, fps: 15, scale: 1 }, status: configured.status,
+    requested: { quality: 70, fps: opts.streamFps, scale: 1 }, status: configured.status,
     applied: configured.json || null,
     note: configured.status === 200 ? '服务接受 stream-config' : '服务无 /stream-config（旧版）：用它的固定参数',
   }
   say(`stream-config → HTTP ${configured.status}${configured.status === 200 ? ` ${JSON.stringify(configured.json)}` : '（旧版没有这个端点，按其固定参数测）'}`)
 
+  report.laneS.provenance = provenance(svc.health.pid, opts.viewerPath)
+  if (report.laneS.provenance) say(`进程取证：pid=${svc.health.pid} 启动于 ${report.laneS.provenance.startedAt}；${report.laneS.provenance.note}`)
   const xvfb = findProcs(['Xvfb', display?.display || '###']).map((p) => p.pid)
   const pids = [svc.health.pid, ...xvfb]
   report.laneS.pids = { service: svc.health.pid, xvfb, display: display?.display }
@@ -606,11 +653,17 @@ async function laneService(svc, report) {
     await stream.stop()
     const flips = readAnimLog(log).filter((r) => r.seq !== undefined)
     const w = windowStats(stream.frames, t0, t1)
+    // 稳态口径：丢掉前 8s。服务端的自适应控制器要 ~10s 才爬到目标档位（viewer 日志里
+    // "自适应回升 → fps 回升到 16/18/20" 可证），整窗口平均会把爬坡算进去 → 低估。
+    const warmSec = Math.min(8, (opts.seconds || 20) / 3)
+    const wSteady = windowStats(stream.frames, t0 + warmSec * 1000, t1)
     const cpu = cpuDelta(cpu0, cpu1, (t1 - t0) / 1000)
     const animPid = anim.pid
     const cpuAnim = cpu[animPid] ?? null
     phases.dynamic = {
-      ...w, animFlips: flips.length - flips0, animFps: (flips.length - flips0) / ((t1 - t0) / 1000),
+      ...w, warmupExcludedSec: warmSec,
+      steady: { contentFps: wSteady.contentFps, bytesPerSec: wSteady.bytesPerSec, seconds: wSteady.seconds },
+      animFlips: flips.length - flips0, animFps: (flips.length - flips0) / ((t1 - t0) / 1000),
       serverStats: stats, cpuPct: { ...cpu, animator: cpuAnim, xvfbSum: xvfb.reduce((s, p) => s + (cpu[p] || 0), 0) },
       streamHeadersSeen: stream.frames.some((f) => f.hasFrameHeaders),
       jpegMagicOk: stream.frames.length ? stream.frames.every((f) => f.jpegMagic) : null,
@@ -623,6 +676,7 @@ async function laneService(svc, report) {
     say(`动态窗口 ${((t1 - t0) / 1000).toFixed(1)}s：发帧 ${w.framesSent}（${w.sentFps.toFixed(1)}/s）`
       + ` 内容帧 ${w.contentFrames}（**${w.contentFps.toFixed(2)} fps**）`
       + ` 带宽 ${kb(w.bytesPerSec)}/s 平均帧 ${w.avgFrameBytes ? kb(w.avgFrameBytes) : '—'}`)
+    say(`        稳态（丢掉前 ${warmSec}s 爬坡）：内容帧 **${wSteady.contentFps.toFixed(2)} fps**、带宽 ${kb(wSteady.bytesPerSec)}/s`)
     say(`        靶画面实际变化 ${(flips.length - flips0) / ((t1 - t0) / 1000)} fps；服务端 /stats `
       + (stats ? `fps=${stats.fps} captured=${stats.captured} encoded=${stats.encoded} skipped=${stats.skipped} bytesPerSec=${stats.bytesPerSec} mode=${stats.mode}` : '不可用（旧版没有 /stats）'))
     say(`        CPU：服务 ${pct(cpu[svc.health.pid])}｜Xvfb ${pct(xvfb.reduce((s, p) => s + (cpu[p] || 0), 0))}｜靶程序 ${pct(cpuAnim)}`)
@@ -767,6 +821,10 @@ const PROBE_SRC = `(() => {
                hasPrev: false, startedAt: Date.now(), surfaceTag: null }
   window.__perfProbe = st
   const findSurface = () => {
+    // 面板画面：优先 dsh-display-panel 自己的 canvas（客户端用 .ddp-canvas），
+    // 免得抓到 UI 里其它 canvas（图表/缩略图）——那会把"面板 fps"测成别人的 fps。
+    const own = [...document.querySelectorAll('canvas.ddp-canvas')].filter(c => c.isConnected)
+    if (own.length) return { el: own[0], kind: 'canvas' }
     const cs = [...document.querySelectorAll('canvas')].filter(c => c.width > 32 && c.height > 32 && c.isConnected)
     if (cs.length) return { el: cs[0], kind: 'canvas' }
     const imgs = [...document.querySelectorAll('img')].filter(i => i.naturalWidth > 32 &&
@@ -857,9 +915,13 @@ async function laneBrowser(report) {
     } catch { return false }
   }
 
-  // CDP：真实网络字节 + 真实渲染进程 CPU
+  // CDP：真实网络字节（page 会话）+ 真实渲染进程 CPU（**browser 会话**）
   const cdp = await context.newCDPSession(page)
   await cdp.send('Network.enable')
+  // ⚠️ `SystemInfo.getProcessInfo` 是 **browser 域**命令，在 page 会话上调用会失败
+  //    （实测：renderer CPU 一直是 null → 报"渲染进程 —"）。必须单开 browser 会话。
+  let browserCdp = null
+  try { browserCdp = await context.browser().newBrowserCDPSession() } catch { browserCdp = null }
   const reqUrl = new Map()
   const netEvents = []
   cdp.on('Network.requestWillBeSent', (e) => reqUrl.set(e.requestId, e.request.url))
@@ -880,31 +942,53 @@ async function laneBrowser(report) {
       }, {}),
     }
   }
-  const procInfo = async () => {
-    try { return await cdp.send('SystemInfo.getProcessInfo') } catch { return null }
+  /**
+   * 浏览器侧 CPU：走 CDP `SystemInfo.getProcessInfo`（每个进程的累计 CPU 秒）。
+   * ⚠️ 不用 `browser.process()`：Playwright 1.61 上根本没有这个方法（实测炸过：
+   *    "browser.process is not a function" 把整个 lane B 打断）。
+   * 渲染进程 CPU 才是"客户端费不费 CPU"的答案；总和则是整棵 Brave 进程树。
+   */
+  const procCpuSnap = async () => {
+    const impls = [
+      async () => (browserCdp ? await browserCdp.send('SystemInfo.getProcessInfo') : null),
+      async () => await cdp.send('SystemInfo.getProcessInfo'),   // 退路：有些版本 page 会话也能问
+      procCpuSnapViaProc,                                        // 退路：/proc 扫 Brave 进程树
+    ]
+    for (const impl of impls) {
+      try {
+        const info = await impl()
+        if (info && info.length) return info
+      } catch { /* 换下一种 */ }
+    }
+    return null
   }
-  const rendererCpu = async () => {
-    const info = await procInfo()
-    if (!info) return null
-    const r = info.processInfo.filter((p) => p.type === 'renderer')
-    return r.reduce((s, p) => s + (p.cpuTime || 0), 0)
-  }
-  const subtreePids = () => {
-    if (!browser.process()) return []
-    const root = browser.process().pid
-    const kids = new Map()
+  /** /proc 兜底：按 --type= 归类 Brave 进程（cmdline 里带 playwright 临时 profile 的那些）。 */
+  const procCpuSnapViaProc = () => {
+    const out = []
     for (const d of fs.readdirSync('/proc')) {
       if (!/^\d+$/.test(d)) continue
-      try {
-        const s = fs.readFileSync(`/proc/${d}/stat`, 'utf8')
-        const ppid = Number(s.slice(s.lastIndexOf(')') + 2).split(' ')[1])
-        if (!kids.has(ppid)) kids.set(ppid, [])
-        kids.get(ppid).push(Number(d))
-      } catch { /* 进程刚退出 */ }
+      let cmd = ''
+      try { cmd = fs.readFileSync(`/proc/${d}/cmdline`, 'utf8').replace(/\0/g, ' ') } catch { continue }
+      if (!/brave|chrome|chromium/i.test(cmd) || !/playwright|--remote-debugging/i.test(cmd)) continue
+      const m = cmd.match(/--type=([a-z-]+)/)
+      const ticks = cpuTicks(Number(d))
+      if (ticks === null) continue
+      out.push({ type: m ? m[1] : 'browser', id: Number(d), cpu: ticks / CLK_TCK })
     }
-    const out = [root]
-    for (let i = 0; i < out.length; i++) for (const c of kids.get(out[i]) || []) out.push(c)
-    return out
+    return out.length ? out : null
+  }
+  const cpuSum = (snap, types) => (!snap ? null
+    : snap.filter((p) => !types || types.includes(p.type)).reduce((s, p) => s + p.cpu, 0))
+  const cpuDeltaByType = (a, b, seconds, types) => {
+    if (!a || !b) return null
+    const m = new Map(a.map((p) => [p.id, p]))
+    let d = 0
+    for (const p of b) {
+      const prev = m.get(p.id)
+      if (prev) d += p.cpu - prev.cpu
+      else d += p.cpu                     // 采样间新起的进程：算它整段（极少见，且方向保守）
+    }
+    return d / seconds * 100
   }
 
   try {
@@ -967,57 +1051,84 @@ async function laneBrowser(report) {
     }
 
     const phases = report.laneB.phases = {}
-    const svcPid = (await api(`/api/dsh-display-panel/info`)).json?.service?.pid ?? null
+    const infoJson = (await api(`/api/dsh-display-panel/info`)).json || {}
+    const svcPid = infoJson.service?.pid ?? null
+    report.laneB.service = {
+      pid: svcPid, port: infoJson.service?.port, version: infoJson.service?.version,
+      managed: infoJson.service?.managed, backend: infoJson.service?.backend, size: infoJson.service?.size,
+      provenance: provenance(svcPid, path.join(REPO, 'service', 'dsh-display-viewer.py')),
+    }
+    say(`面板用的服务：pid=${svcPid} port=${infoJson.service?.port} version=${infoJson.service?.version} `
+      + `managed=${infoJson.service?.managed}`)
+    if (report.laneB.service.provenance) say(`        取证：${report.laneB.service.provenance.note}`)
     const statsProbe = async () => (await api(`/api/dsh-display-panel/stats?session=${encodeURIComponent(sid)}`))
 
     // ---------------------------------------------------------- B1 动态：内容 fps / 带宽 / CPU
-    {
+    if (opts.adversarialOnly) {
+      await startAnimViaApi(['--fps', String(opts.animFps), '--duration', '300', '--label', opts.label], animLog)
+      say('（--adversarial-only：跳过测量阶段，只跑对抗性检查）')
+    }
+    if (!opts.adversarialOnly) {
       const ex = await startAnimViaApi(['--fps', String(opts.animFps), '--duration', String(opts.seconds + 15),
         '--label', opts.label], animLog)
       await api(`/api/dsh-display-panel/stream-config?session=${encodeURIComponent(sid)}`,
-        { method: 'POST', body: { quality: 70, fps: 15, scale: 1 } }).catch(() => {})
+        { method: 'POST', body: { quality: 70, fps: opts.streamFps, scale: 1 } }).catch(() => {})
       await page.evaluate(() => { window.__perfProbe.changes.length = 0 })
-      const cpuSnap = cpuSnapshot([svcPid, ...subtreePids()].filter(Boolean))
-      const rc0 = await rendererCpu()
+      const cpuSnap = cpuSnapshot([svcPid].filter(Boolean))
+      const bc0 = await procCpuSnap()
       const t0 = nowMs()
       await page.waitForTimeout(opts.seconds * 1000)
       const t1 = nowMs()
-      const rc1 = await rendererCpu()
+      const bc1 = await procCpuSnap()
       const cpuAfter = cpuSnapshot(Object.keys(cpuSnap).map(Number))
       const cpu = cpuDelta(cpuSnap, cpuAfter, (t1 - t0) / 1000)
+      const dur0 = (t1 - t0) / 1000
       const probs = await page.evaluate(() => window.__perfProbe.changes.slice())
       const probeState = await page.evaluate(() => ({ samples: window.__perfProbe.samples, kind: window.__perfProbe.kind, errors: window.__perfProbe.errors }))
       const flips = readAnimLog(animLog).filter((r) => r.seq !== undefined)
       const net = netBytes(t0, t1)
       const stats = await statsProbe()
       const dur = (t1 - t0) / 1000
-      phases.dynamic = {
+      // 客户端自己报的数字（状态条徽章）—— 与我独立测的对照，不一致就是发现
+      const clientBadges = await page.evaluate(() => [...document.querySelectorAll('.ddp-badge, .ddp-stat, .ddp-mini')]
+        .map((e) => (e.innerText || '').trim()).filter(Boolean)).catch(() => [])
+      const warmSec = Math.min(8, (opts.seconds || 20) / 3)
+      const steadyChanges = probs.filter((p) => p.t >= t0 + warmSec * 1000).length
+      const steadySec = Math.max(0.001, dur - warmSec)
+      phases.dynamic = { clientBadges, warmupExcludedSec: warmSec,
+        steady: { contentFps: steadyChanges / steadySec, seconds: steadySec, changes: steadyChanges },
         seconds: dur, canvasChanges: probs.length, contentFps: probs.length / dur,
         probeSamples: probeState.samples, probeFps: probeState.samples / dur, probeKind: probeState.kind,
         probeErrors: probeState.errors,
         animFlips: flips.length, animFps: flips.length / dur,
         panelBytesPerSec: net.panel / dur, allBytesPerSec: net.all / dur, bytesByPath: net.byPath,
         serviceCpuPct: svcPid ? (cpu[svcPid] ?? null) : null,
-        browserCpuPct: Object.values(cpu).reduce((a, b) => a + b, 0) - (svcPid ? (cpu[svcPid] || 0) : 0),
-        rendererCpuPct: rc0 !== null && rc1 !== null ? (rc1 - rc0) / dur * 100 : null,
+        browserCpuPct: cpuDeltaByType(bc0, bc1, dur0, null),
+        rendererCpuPct: cpuDeltaByType(bc0, bc1, dur0, ['renderer']),
+        browserProcCount: bc1 ? bc1.length : null,
+        browserProcTypes: bc1 ? bc1.map((p) => p.type) : null,
         serverStats: stats.json, serverStatsStatus: stats.status,
       }
       await shot('dynamic')
       say(`动态窗口 ${dur.toFixed(1)}s：canvas 内容帧 ${probs.length}（**${(probs.length / dur).toFixed(2)} fps**，`
+        + `稳态（丢掉前 ${warmSec}s）**${(steadyChanges / steadySec).toFixed(2)} fps**，`
         + `rAF 采样 ${probeState.samples} 次/surface=${probeState.kind}）；靶画面 ${flips.length}（${(flips.length / dur).toFixed(1)} fps）`)
       say(`        客户端实收面板字节 ${kb(net.panel / dur)}/s（全页 ${kb(net.all / dur)}/s）`
         + `；/stats ` + (stats.json ? `fps=${stats.json.fps} bytesPerSec=${stats.json.bytesPerSec} mode=${stats.json.mode} quality=${stats.json.quality} fps_cfg=${stats.json.fps}` : `不可用(HTTP ${stats.status})`))
       say(`        CPU：服务 ${pct(phases.dynamic.serviceCpuPct)}｜渲染进程 ${pct(phases.dynamic.rendererCpuPct)}｜Brave 全树 ${pct(phases.dynamic.browserCpuPct)}`)
+      if (clientBadges.length) say(`        面板自报：${clientBadges.join(' | ')}`)
       if (!opts.keep) await killViaApi(ex.pid)
     }
 
     // ---------------------------------------------------------- B2 变化延迟（脉冲 + canvas / 探针流交叉验证）
-    {
+    if (!opts.adversarialOnly) {
       const N = 14, INTERVAL = 0.61        // 同 lane S：与抓帧周期互质，扫相位
       await startAnimViaApi(['--static', '--pulse-interval', String(INTERVAL), '--pulses', String(N),
         '--duration', String(N * INTERVAL + 8), '--label', opts.label], animLog)
       // 页面内自带一条 MJPEG 观察连接：与面板**互不干扰**地看同一条流，用来交叉验证延迟
-      await page.evaluate(async (url) => {
+      // ⚠️ 这里**故意不 await**：page.evaluate 的 promise 要等流断开才 resolve，
+      //    await 会把整个阶段卡死（等到靶程序 duration 结束）。fire-and-forget，结果从 window.__perfStream 读。
+      page.evaluate(async (url) => {
         const st = window.__perfStream = { frames: [], bytes: 0, status: 0, ct: null, error: null, headers: null, parsed: 0 }
         try {
           const r = await fetch(url, { cache: 'no-store' })
@@ -1096,23 +1207,29 @@ async function laneBrowser(report) {
           p50: streamP[50], p95: streamP[95],
           serverAgeP50: pcts(spairs.map((x) => x.serverAgeMs).filter((v) => v !== null))[50] ?? null },
         clientOverheadP50: canvasP[50] !== null && streamP[50] !== null ? canvasP[50] - streamP[50] : null,
+        // ⚠️ 只有在"上游不重发重复帧"时，两条连接才看的是**同一批**帧，相减才有意义。
+        //    旧版每 0.2s 无脑重发同一帧 → 两条连接的帧相位各自随机 → 相减是噪声，不是客户端开销。
+        clientOverheadComparable: !(phases.dynamic && phases.dynamic.sentFps > phases.dynamic.contentFps * 1.2),
       }
       await shot('latency')
       say(`变化延迟（X 画面变化 → canvas 画出来，n=${lats.length}/${flips.length}）：p50 **${ms(canvasP[50])}** p95 ${ms(canvasP[95])}`)
       say(`        独立流观察同一条流：p50 ${ms(streamP[50])}（HTTP ${streamState.status}，帧头 `
         + `${streamState.headers ? `有（X-DSH-Time）→ 抓帧→到达 p50 ${ms(phases.latency.probeStream.serverAgeP50)}` : '无（旧版）'}）`
-        + `；客户端解码+绘制开销 ≈ ${ms(phases.latency.clientOverheadP50)}`)
+        + `；与 canvas 的差 ≈ ${ms(phases.latency.clientOverheadP50)}`
+        + (phases.latency.clientOverheadComparable ? '（可相减）' : '（**不可相减**：上游在重发重复帧，两条连接相位各自随机）'))
       if (!opts.keep) await killViaApi((await api(`/api/dsh-display-panel/procs?session=${encodeURIComponent(sid)}`)).json?.procs?.slice(-1)[0]?.pid)
     }
 
     // ---------------------------------------------------------- B3 按键注入延迟（含输入链路）
-    {
+    if (!opts.adversarialOnly) {
       await startAnimViaApi(['--static', '--duration', '60', '--label', `${opts.label}-key`], animLog)
       await page.waitForTimeout(1200)
       const keyLats = []
       const details = []
+      // 先把每一次注入的 flip 时刻记下来，**最后再配对**：
+      // 在 flip 瞬间读探针必然没有变化（画面还没画出来）→ 会得到 n=0 的假象（踩过）。
+      await page.evaluate(() => { window.__perfProbe.changes.length = 0 })
       for (let i = 0; i < 6; i++) {
-        await page.evaluate(() => { window.__perfProbe.changes.length = 0 })
         const n0 = readAnimLog(animLog).filter((r) => r.src === 'key').length
         const tPost0 = nowMs()
         const r = await api(`/api/dsh-display-panel/input?session=${encodeURIComponent(sid)}`,
@@ -1121,13 +1238,17 @@ async function laneBrowser(report) {
         const got = await waitFor(animLog, (rec) => bySrc(rec, 'key').length >= n0 + 1, 3000)
         const rec = got.filter((x) => x.src === 'key')[n0]
         if (!rec) { details.push({ error: 'no flip', inputStatus: r.status }); continue }
-        const tFlip = rec.t * 1000
-        const probs = await page.evaluate(() => window.__perfProbe.changes.slice())
-        const hit = probs.find((p) => p.t > tFlip)
-        const lat = hit ? hit.t - tFlip : null
-        details.push({ inputStatus: r.status, inputPathMs: tFlip - tPost0, postMs: tPost1 - tPost0, latencyMs: lat })
-        if (lat !== null) keyLats.push(lat)
+        details.push({ inputStatus: r.status, tFlip: rec.t * 1000,
+          inputPathMs: rec.t * 1000 - tPost0, postMs: tPost1 - tPost0, latencyMs: null })
         await page.waitForTimeout(900)
+      }
+      await page.waitForTimeout(1200)                       // 让最后一拍的绘制也落下来
+      const probsAll = await page.evaluate(() => window.__perfProbe.changes.slice())
+      for (const d of details) {
+        if (!d.tFlip) continue
+        const hit = probsAll.find((p) => p.t > d.tFlip && p.t <= d.tFlip + 4000)
+        d.latencyMs = hit ? hit.t - d.tFlip : null
+        if (d.latencyMs !== null) keyLats.push(d.latencyMs)
       }
       const kp = pcts(keyLats)
       phases.keyLatency = { n: keyLats.length, p50: kp[50], p95: kp[95], details,
@@ -1139,16 +1260,16 @@ async function laneBrowser(report) {
     }
 
     // ---------------------------------------------------------- B4 静止带宽 + CPU
-    {
+    if (!opts.adversarialOnly) {
       await startAnimViaApi(['--static', '--duration', String(opts.seconds + 10), '--label', opts.label], animLog)
       await page.waitForTimeout(3000)
-      const cpuSnap = cpuSnapshot([svcPid, ...subtreePids()].filter(Boolean))
-      const rc0 = await rendererCpu()
+      const cpuSnap = cpuSnapshot([svcPid].filter(Boolean))
+      const bc0 = await procCpuSnap()
       await page.evaluate(() => { window.__perfProbe.changes.length = 0 })
       const t0 = nowMs()
       await page.waitForTimeout(opts.seconds * 1000)
       const t1 = nowMs()
-      const rc1 = await rendererCpu()
+      const bc1 = await procCpuSnap()
       const cpuAfter = cpuSnapshot(Object.keys(cpuSnap).map(Number))
       const cpu = cpuDelta(cpuSnap, cpuAfter, (t1 - t0) / 1000)
       const probs = await page.evaluate(() => window.__perfProbe.changes.slice())
@@ -1159,7 +1280,8 @@ async function laneBrowser(report) {
         seconds: dur, canvasChanges: probs.length, contentFps: probs.length / dur,
         panelBytesPerSec: net.panel / dur, allBytesPerSec: net.all / dur, bytesByPath: net.byPath,
         serviceCpuPct: svcPid ? (cpu[svcPid] ?? null) : null,
-        rendererCpuPct: rc0 !== null && rc1 !== null ? (rc1 - rc0) / dur * 100 : null,
+        rendererCpuPct: cpuDeltaByType(bc0, bc1, dur, ['renderer']),
+        browserCpuPct: cpuDeltaByType(bc0, bc1, dur, null),
         serverStats: stats.json, serverStatsStatus: stats.status,
       }
       await shot('static')
@@ -1174,7 +1296,7 @@ async function laneBrowser(report) {
 
     // ---------------------------------------------------------- 对抗性检查
     if (opts.adversarial) {
-      phases.adversarial = await adversarial(context, page, api, { sid, animLog, startAnimViaApi, killViaApi, shot, svcPid, subtreePids, rendererCpu, nowMs, netBytes })
+      phases.adversarial = await adversarial(context, page, api, { sid, animLog, startAnimViaApi, killViaApi, shot, svcPid, nowMs, netBytes })
     }
 
     report.laneB.metrics = {
@@ -1238,7 +1360,7 @@ async function adversarial(context, page, api, ctx) {
     say(`        面板可用性：contentFps=${(probs.length / dur).toFixed(2)} 非黑像素=${pix ? pix.nonblack + '/' + pix.total : '—'}`
       + ` → ${out.extremeConfig.usable ? '可用（画面仍在动）' : '⚠️ 不可用/画面静止'}`)
     await shot('extreme')
-    await api(`/api/dsh-display-panel/stream-config?session=${enc}`, { method: 'POST', body: { quality: 70, fps: 15, scale: 1 } }).catch(() => {})
+    await api(`/api/dsh-display-panel/stream-config?session=${enc}`, { method: 'POST', body: { quality: 70, fps: opts.streamFps, scale: 1 } }).catch(() => {})
   }
 
   // ---- 2) 流被中断后自愈（服务重启）
@@ -1246,9 +1368,16 @@ async function adversarial(context, page, api, ctx) {
     const before = await page.evaluate(() => window.__perfProbe?.changes?.length ?? 0)
     const rst = await api(`/api/dsh-display-panel/service`, { method: 'POST', body: { action: 'restart' } })
     say(`服务重启（宿主 /service action=restart）：HTTP ${rst.status} ${rst.text.slice(0, 200)}`)
+    // ⚠️ 重启会把服务 /exec 起的靶程序一起收掉（服务自己的 cleanup），于是"画面不动"未必等于
+    //    "面板没自愈"。判定前必须**重新在会话显示上放一个会动的东西**，否则测的是空显示（踩过）。
+    await page.waitForTimeout(4000)
+    const reAnim = await api(`/api/dsh-display-panel/exec?session=${enc}`,
+      { method: 'POST', body: { argv: ['python3', ANIM, '--log', animLog + '.heal', '--fps', '10',
+        '--duration', '90', '--label', `${opts.label}-heal`], cwd: REPO, wait: false } })
+    say(`        重启后重新放会动的内容：exec HTTP ${reAnim.status} pid=${reAnim.json?.pid} display=${reAnim.json?.display}`)
     let recovered = null
     const t0 = Date.now()
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
       await page.waitForTimeout(1000)
       const n = await page.evaluate(() => window.__perfProbe?.changes?.length ?? 0)
       if (n > before + 3) { recovered = Date.now() - t0; break }
@@ -1261,7 +1390,9 @@ async function adversarial(context, page, api, ctx) {
       for (let i = 0; i < d.length; i += 4) if (d[i] > 12 || d[i + 1] > 12 || d[i + 2] > 12) nonblack++
       return { nonblack, total: d.length / 4 }
     })
-    out.restartHeal = { actionStatus: rst.status, response: rst.text.slice(0, 300), recoveredAfterMs: recovered, canvas: pix }
+    out.restartHeal = { actionStatus: rst.status, response: rst.text.slice(0, 300), recoveredAfterMs: recovered,
+      canvas: pix, reAnim: { status: reAnim.status, pid: reAnim.json?.pid, display: reAnim.json?.display },
+      note: '判定前重新放了会动的内容（服务重启会连带收掉旧靶程序）' }
     say(`        自愈：画面重新变化用时 ${recovered === null ? '⚠️ >40s 未恢复' : recovered + 'ms'}；canvas 非黑 ${pix ? pix.nonblack + '/' + pix.total : '—'}`)
     await shot('after-restart')
     const procs = (await api(`/api/dsh-display-panel/procs?session=${enc}`)).json?.procs || []
@@ -1361,10 +1492,15 @@ try {
     say('')
     say(`❌ 未达 §5.1：${failed.map((c) => `${c.name} ${c.value?.toFixed?.(2)}（目标 ${c.target}，${c.gap}）`).join('；')}`)
     if (exitCode === 0) exitCode = 1
+  } else if (!checks.some((c) => c.ok === true)) {
+    say('')
+    say('⚠️ 本轮**没有取到任何有效指标**（全是"未测"）——这不是"达标"，是"没测成"，看上面的报错')
+    if (exitCode === 0) exitCode = 2
   } else {
+    const unmeasured = checks.filter((c) => c.ok === null).map((c) => c.name)
     say('')
     say('✅ 本次测得的口径内全部达标'
-      + (mB ? '' : '（注意：客户端侧未测 —— 面板真实观感还要 lane B 才算数）'))
+      + (unmeasured.length ? `（未测：${unmeasured.join('、')}）` : ''))
   }
 } catch (e) {
   report.error = String(e.stack || e.message || e)

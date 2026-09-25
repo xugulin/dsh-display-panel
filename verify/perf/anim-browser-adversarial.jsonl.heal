@@ -1,0 +1,5 @@
+{"event": "READY", "t": 1790313826.6732345, "pid": 1473057, "display": ":212", "size": "1600x1000", "depth": 24, "mode": "anim@10", "fps": 10.0, "pulseInterval": null, "window": 10485761, "label": "adversarial-heal"}
+{"t": 1790313826.6735811, "seq": 0, "src": "init"}
+{"t": 1790313826.7241778, "seq": 0, "src": "expose"}
+{"t": 1790313826.7740085, "seq": 1, "src": "tick"}
+{"event": "DONE", "t": 1790313826.824224, "seq": 1, "flips": 3, "reason": "signal:SIGTERM", "parent": 1470637, "pgid": 1473057}

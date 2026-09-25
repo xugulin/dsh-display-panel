@@ -1,0 +1,4 @@
+{"event": "READY", "t": 1790313220.493742, "pid": 1082873, "display": ":315", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 4194305, "label": "improved-0.4.0"}
+{"t": 1790313220.4941025, "seq": 0, "src": "init"}
+{"t": 1790313220.5462506, "seq": 0, "src": "expose"}
+{"event": "DONE", "t": 1790313242.6915383, "seq": 0, "flips": 2, "reason": "signal:SIGTERM", "parent": 1052157, "pgid": 1082873}

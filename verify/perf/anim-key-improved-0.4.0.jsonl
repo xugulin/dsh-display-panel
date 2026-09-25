@@ -1,0 +1,11 @@
+{"event": "READY", "t": 1790313213.107465, "pid": 1078243, "display": ":315", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": null, "window": 4194305, "label": "improved-0.4.0-key"}
+{"t": 1790313213.1077814, "seq": 0, "src": "init"}
+{"t": 1790313213.1583414, "seq": 0, "src": "expose"}
+{"t": 1790313213.3779743, "seq": 1, "src": "key"}
+{"t": 1790313213.538694, "seq": 2, "src": "key"}
+{"t": 1790313214.488477, "seq": 3, "src": "key"}
+{"t": 1790313215.4424314, "seq": 4, "src": "key"}
+{"t": 1790313216.406868, "seq": 5, "src": "key"}
+{"t": 1790313217.353163, "seq": 6, "src": "key"}
+{"t": 1790313218.3071036, "seq": 7, "src": "key"}
+{"event": "DONE", "t": 1790313219.3603559, "seq": 7, "flips": 9, "reason": "signal:SIGTERM", "parent": 1052157, "pgid": 1078243}

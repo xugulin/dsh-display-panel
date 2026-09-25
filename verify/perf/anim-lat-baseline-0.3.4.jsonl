@@ -1,12 +1,18 @@
-{"event": "READY", "t": 1790312682.1370206, "pid": 745705, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": 1.4, "window": 2097153, "label": "baseline-0.3.4"}
-{"t": 1790312682.137502, "seq": 0, "src": "init"}
-{"t": 1790312682.1881437, "seq": 0, "src": "expose"}
-{"t": 1790312683.537941, "seq": 1, "src": "pulse"}
-{"t": 1790312684.937933, "seq": 2, "src": "pulse"}
-{"t": 1790312686.3379028, "seq": 3, "src": "pulse"}
-{"t": 1790312687.7379708, "seq": 4, "src": "pulse"}
-{"t": 1790312689.1380432, "seq": 5, "src": "pulse"}
-{"t": 1790312690.5388396, "seq": 6, "src": "pulse"}
-{"t": 1790312691.937955, "seq": 7, "src": "pulse"}
-{"t": 1790312693.3378942, "seq": 8, "src": "pulse"}
-{"event": "DONE", "t": 1790312693.8893116, "seq": 8, "flips": 10, "reason": "signal:SIGTERM", "parent": 732548, "pgid": 745705}
+{"event": "READY", "t": 1790312777.020485, "pid": 805619, "display": ":363", "size": "1600x1000", "depth": 24, "mode": "static", "fps": 0.0, "pulseInterval": 0.61, "window": 2097153, "label": "baseline-0.3.4"}
+{"t": 1790312777.0208757, "seq": 0, "src": "init"}
+{"t": 1790312777.0713937, "seq": 0, "src": "expose"}
+{"t": 1790312777.6313663, "seq": 1, "src": "pulse"}
+{"t": 1790312778.241509, "seq": 2, "src": "pulse"}
+{"t": 1790312778.8512752, "seq": 3, "src": "pulse"}
+{"t": 1790312779.4613197, "seq": 4, "src": "pulse"}
+{"t": 1790312780.0712087, "seq": 5, "src": "pulse"}
+{"t": 1790312780.6812115, "seq": 6, "src": "pulse"}
+{"t": 1790312781.2912269, "seq": 7, "src": "pulse"}
+{"t": 1790312781.901201, "seq": 8, "src": "pulse"}
+{"t": 1790312782.5112484, "seq": 9, "src": "pulse"}
+{"t": 1790312783.121367, "seq": 10, "src": "pulse"}
+{"t": 1790312783.732019, "seq": 11, "src": "pulse"}
+{"t": 1790312784.342423, "seq": 12, "src": "pulse"}
+{"t": 1790312784.954277, "seq": 13, "src": "pulse"}
+{"t": 1790312785.5614161, "seq": 14, "src": "pulse"}
+{"event": "DONE", "t": 1790312786.1161005, "seq": 14, "flips": 16, "reason": "signal:SIGTERM", "parent": 791820, "pgid": 805619}
