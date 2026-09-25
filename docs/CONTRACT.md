@@ -201,3 +201,79 @@ ctx.inject(['tools'], (toolsCtx) => {
 3. 服务端的 `Xvfb` 是按需创建的；`/health`、索引页、`/state`（无会话时）都**不得**创建会话。
 4. win32 / darwin 后端抓的是**真实桌面**，注入默认关闭（`DSH_VIEW_INPUT=1` 才开），
    面板必须把 `realDesktop` 状态显式显示给用户。
+
+---
+
+## 5. 流畅度与观感契约（v0.4.0，冻结）
+
+> 目的：把"更流畅、更好看"变成**可测量的指标**，而不是感觉。
+> 0.3.4 的基线（本机实测，1600×1000 X11）：抓帧间隔 0.5s → **内容刷新 2 fps**；
+> 每帧 spawn 一次 `import` ≈ 45ms/帧；客户端每 130ms 一次 HTTP 往返，**大量重复帧**
+> （同一张 JPEG 被反复传输、解码、重绘）。
+
+### 5.1 指标（验收线）
+
+| 指标 | 基线（0.3.4） | 目标（0.4.0） | 怎么测 |
+|---|---|---|---|
+| 内容 fps（客户端画面上真正变化的帧） | ~2 | **≥ 15** | `tools/perf-panel.mjs`：在会话显示上跑一个会动的窗口，统计客户端 canvas 的**去重后**帧率 |
+| 变化延迟 p50（X 侧改动 → 客户端画出来） | ~600ms | **≤ 150ms** | 同上：在 X 侧切换画面并记录时间戳，客户端检测到像素变化即计时 |
+| 静止画面带宽 | ~7 fps × 7KB ≈ 50KB/s | **≤ 5KB/s**（静止时几乎不发） | `/stats` 的 `bytesPerSec` + 客户端统计 |
+| 服务单核 CPU（15fps 时） | — | 服务自身 **≤ 15%**；**服务+编码子进程 ≤ 40%**；静止 ≤ 2% | `ps`/`/proc` 采样（两个数都要报） |
+| 既有功能 | — | 不回退（selfcheck / selftest / e2e 全绿） | 既有三套测试 |
+
+### 5.2 服务端：抓帧 → 编码 → 流
+
+* **抓帧**：X11 优先走**进程内** `XGetImage`（ctypes + libX11，实测 3ms/帧），
+  不再每帧 spawn `import`（45ms/帧）。libX11 不可用时退回 `import`（保持可用，只是慢）。
+* **驱动方式**：能用 **XDamage** 就用它（事件驱动：静止时零抓帧零编码、变化时立刻出帧，
+  实测 root window 能收到子窗口重绘）。damage 成串爆发要**合并去抖**（按 `fps` 上限出帧，
+  但最后那一帧必须发出去）；没有 XDamage 的服务器退回轮询（`IDLE_FPS=4`）。
+  `/stats.mode` 要能分辨 `xgetimage+xdamage` / `xgetimage+poll` / `import`。
+* **编码**：优先用**常驻**编码进程（`ffmpeg -f rawvideo ... -f mjpeg -` 或 `magick`），
+  一次起进程、持续出 JPEG；都没有时退回 `import`。
+* **去重**：对抓到的原始帧算 CRC32；**内容没变就不重新编码、不发帧**（静止时带宽趋近 0）。
+  每帧时间戳随帧下发，客户端据此算出真实 fps。
+* **自适应**：服务按 `quality`（1..100）、`fps`（1..30）、`scale`（0.25..1.0）三个参数工作，
+  默认 `quality=70, fps=15, scale=1`；客户端/宿主可通过 `POST /s/<sid>/stream-config` 调整。
+  抓不动或编码不过来时**自己降档**（先降 fps，再降 scale，最后降 quality），并在 `/stats` 里说明原因。
+
+### 5.3 传输：MJPEG 长连接（不是每帧一次 HTTP）
+
+`GET /api/dsh-display-panel/stream?session=<sid>`（宿主同源代理 → 上游 `/s/<sid>/stream`）
+返回 `multipart/x-mixed-replace; boundary=frame`，每个 part：
+
+```
+--frame\r\n
+Content-Type: image/jpeg\r\n
+Content-Length: <n>\r\n
+X-DSH-Seq: <单调递增帧号>\r\n
+X-DSH-Time: <抓帧时刻的 epoch 毫秒>\r\n
+X-DSH-Size: <WxH>\r\n
+X-DSH-Cursor: <x,y 归一化 0..1>\r\n
+\r\n
+<JPEG 字节>\r\n
+```
+
+* 客户端用 `fetch()` + `ReadableStream` 解析（**不要**用 `<img>`：断了不会重连、也无法丢帧）。
+* 游标位置**随帧下发**，客户端不必再轮询 `/state`（0.3.4 是 2 秒一次，肉眼可见的滞后）。
+* 兼容：不支持流的上游（旧版服务）→ 客户端自动退回轮询 `/frame`（既有路径不得删）。
+
+### 5.4 客户端：渲染与观感
+
+* **绘制**：`createImageBitmap` + `requestAnimationFrame`；**最新帧优先** ——
+  解码排队时丢掉中间帧（只画最新），绝不为了"每帧都画"而堆积延迟。
+* **清晰度**：canvas 按 `devicePixelRatio` 分配后备缓冲；`imageSmoothingQuality='high'`；
+  提供 **1:1（点对点）/ 适应窗口** 两种缩放模式，默认适应窗口。
+* **视觉**：跟随 DSH 主题变量（浅色/深色都要能看）；状态条含连接指示、fps、后端、
+  分辨率、以及"真实桌面/只读"警示；工具条含 适应 / 1:1 / 缩放 / 平滑 / 全屏；
+  载入有骨架屏，首帧淡入，断线有明确文案；letterbox 底色用主题面色，不再写死纯黑。
+* **交互反馈**：鼠标指针画成光标精灵（不是十字线）；点击有涟漪反馈；拖拽有状态提示。
+* **省电**：标签页不可见（`document.visibilityState==='hidden'`）时暂停拉流并通知服务降档；
+  重新可见时恢复。
+
+### 5.5 观测接口
+
+* `GET /s/<sid>/stats?k=` → `{"fps":…,"captured":…,"encoded":…,"skipped":…,"bytesPerSec":…,
+  "quality":…,"scale":…,"mode":"xgetimage+xdamage|xgetimage+poll|import","captureMs":…,"encodeMs":…,
+  "damageEvents":…,"lastFrameAgeMs":…,"cursor":{…}}`
+* 宿主 `GET /api/dsh-display-panel/stats?session=` 透传（供面板显示与 perf 脚本断言）。
