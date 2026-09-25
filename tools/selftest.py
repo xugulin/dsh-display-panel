@@ -676,6 +676,16 @@ def dynamic_checks(viewer: Viewer) -> None:
 
     # D3 /health 与索引页都**不得**创建会话
     if health_ok:
+        # 版本自报必须跟着 package.json 走：写死常量会在发版后对不上
+        # （真发生过：面板状态条写 viewer 0.3.0，而实际装的是 0.3.2，排查时很误导）
+        try:
+            pkg_ver = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+        except Exception:                                     # noqa: BLE001
+            pkg_ver = None
+        ok("/health 自报版本与 package.json 一致",
+           pkg_ver is None or health.get("version") == pkg_ver,
+           f"/health={health.get('version')} package.json={pkg_ver}")
+
         s1 = health.get("sessions")
         viewer.req("GET", "/health")
         viewer.req("GET", "/")

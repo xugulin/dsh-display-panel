@@ -118,7 +118,31 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 SERVICE_NAME = "dsh-display-viewer"
-VERSION = "0.3.0"
+
+
+def _package_version() -> str:
+    """服务版本 = **包版本**（``<包>/package.json``），读不到才退回常量。
+
+    为什么不再写死：写死的常量在每次发版时都得记得手动改，忘了就会出现
+    "面板状态条写着 viewer 0.3.0，而实际装的是 0.3.2"这种对不上的情况
+    （真发生过：0.3.1/0.3.2 发布后服务仍然自报 0.3.0，排查时非常误导）。
+    这个文件就在 ``<包>/service/`` 下，读 ``../package.json`` 即可。
+
+    读失败（被单独拷出来跑、权限问题、JSON 坏了）**绝不能影响服务启动** ——
+    退回常量即可，版本号只是给人看的。
+    """
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "package.json"), encoding="utf-8") as fh:
+            value = json.load(fh).get("version")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    except Exception:                                # noqa: BLE001
+        pass
+    return "0.3.3"
+
+
+VERSION = _package_version()
 
 IS_WIN = sys.platform == "win32"
 IS_MAC = sys.platform == "darwin"
