@@ -193,8 +193,15 @@ def static_checks() -> None:
             pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
             m = re.search(r"接口契约（v([0-9.]+)", CONTRACT.read_text(encoding="utf-8"))
             cver = m.group(1) if m else "?"
-            record("package.json 版本与契约版本一致", str(pkg.get("version")) == cver,
-                   f"package.json={pkg.get('version')} 契约={cver}")
+            pver = str(pkg.get("version"))
+            # 只比 major.minor：契约描述的是**接口**，补丁版（x.y.Z）改的是实现，
+            # 不该逼着每次发补丁都去动契约头部 —— 但跨 minor（0.3 → 0.4）必须同步，
+            # 那才是"接口变了、文档没跟上"的时刻。
+            def mm(v: str) -> str:
+                parts = v.split(".")
+                return ".".join(parts[:2]) if len(parts) >= 2 else v
+            record("package.json 与契约的版本（major.minor）一致", mm(pver) == mm(cver),
+                   f"package.json={pver} 契约={cver}")
         except Exception as exc:                              # noqa: BLE001
             record("package.json 可解析", False, str(exc))
 
