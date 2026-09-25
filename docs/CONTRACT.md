@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.4.3，冻结）
+# dsh-display-panel 接口契约（v0.5.0，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
@@ -296,3 +296,41 @@ X-DSH-Cursor: <x,y 归一化 0..1>\r\n
    "stream":{"fps":…,"fpsCap":…,"quality":…,"scale":…,"mode":…}}
   ```
 * 宿主 `GET /api/dsh-display-panel/stats?session=` 透传（供面板显示与 perf 脚本断言）。
+
+---
+
+## 6. 随包工具（v0.5.0，冻结的命令行表面）
+
+这些脚本随 npm 包发布，用户会直接调用，所以它们的**命令行参数算对外契约**：
+改参数名/删参数要按语义化版本走（删/改 = breaking）。
+
+### 6.1 `tools/session-wall.py` —— 实时会话墙
+
+```
+session-wall.py --file <会话记录> [--title T] [--sid S] [--width W] [--height H]
+                [--fps N] [--cache DIR] [--seconds N] [--dry-run]
+```
+
+* `--file` 支持 `.zstd`（会话记录的默认格式）与未压缩 `.jsonl`；
+* `--dry-run` 只解析并打印，**不需要 X**（自检与跨平台测试用它）；
+* 事件类型 → 标签/配色的映射见源码 `KINDS`（用户/助手/工具/结果/任务/成员/传讯/步骤/标题）；
+* 退出码：0 正常，非 0 = 参数或依赖错误。
+
+### 6.2 `tools/display-cards.py` —— 卡片生成与铺图
+
+```
+display-cards.py testcard --out FILE [--width W] [--height H]
+display-cards.py quote --text T [--text T2 ...] [--sub S] [--foot F] [--out FILE]
+                       [--width W] [--height H] [--top 色] [--bottom 色]
+display-cards.py show FILE [--display :N] [--seconds N] [--geometry WxH]
+```
+
+* `testcard` / `quote` 生成 PNG；尺寸默认 1600x1000；
+* `show` 用 `ffplay` 无边框全屏循环显示（**不要**用 ImageMagick `display -window root`，
+  它在 Xvfb 上是静默失败）；
+* 依赖：`magick`（ImageMagick）；`show` 另需 `ffplay`。缺依赖时报错退出（非 0）。
+
+### 6.3 文档与示例
+
+`docs/EXAMPLES.md` 记录三个真实用例（彩色测试图 / 文字卡片 / 实时会话墙）与它们的调用方式，
+含"跨会话投屏"的宿主 HTTP 调用示例。

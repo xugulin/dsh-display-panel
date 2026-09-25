@@ -201,6 +201,57 @@ def static_checks() -> None:
                    "返回的不是 JPEG" in tools_src and "isJpeg" in tools_src,
                    "display_panel_screenshot 的响应校验")
 
+            # ---- 随包工具（0.5.0）：会话墙解析器 + 卡片生成器
+            # 会话墙：喂一份**未压缩**的合成记录，断言各类事件都被解析出来。
+            #   不需要 X（read_events 是纯解析），所以 CI 上也能跑。
+            try:
+                import importlib.util as _ilu
+                import tempfile as _tf
+                spec = _ilu.spec_from_file_location("ddp_wall", ROOT / "tools" / "session-wall.py")
+                wall = _ilu.module_from_spec(spec)
+                spec.loader.exec_module(wall)
+                fixture = Path(_tf.mkdtemp(prefix="ddp-wall-")) / "s.jsonl"
+                fixture.write_text("\n".join([
+                    '{"type":"session","version":4,"id":"session-x","cwd":"/tmp"}',
+                    '{"type":"user/message","seq":1,"time":1700000000000,'
+                    '"data":{"content":[{"type":"text","text":"你好"}]}}',
+                    '{"type":"assistant/message","seq":2,"time":1700000001000,"data":{"message":{"content":['
+                    '{"type":"reasoning","text":"内心戏不该出现"},{"type":"text","text":"收到"}]}}}',
+                    '{"type":"tool/call","seq":3,"time":1700000002000,'
+                    '"data":{"name":"bash","arguments":"{\\"command\\":\\"ls -la\\"}"}}',
+                    '{"type":"team/task","seq":4,"time":1700000003000,'
+                    '"data":{"task":{"id":"task-1","subject":"验证容量"}}}',
+                    '{"type":"session/title","seq":5,"time":1700000004000,"data":{"title":"合成标题"}}',
+                ]), encoding="utf-8")
+                evs, wmeta = wall.read_events(str(fixture))
+                kinds = [e["kind"] for e in evs]
+                record("会话墙：从记录里解析出各类事件（用户/助手/工具/任务）",
+                       kinds == ["user", "assistant", "tool", "task"], f"kinds={kinds}")
+                body = " ".join(e["text"] for e in evs)
+                record("会话墙：取文本时跳过 reasoning（内心戏）",
+                       "收到" in body and "内心戏" not in body, f"text={body[:80]!r}")
+                record("会话墙：能读到会话标题", wmeta.get("title") == "合成标题", f"title={wmeta.get('title')!r}")
+            except Exception as exc:                                  # noqa: BLE001
+                record("会话墙：解析器可用", False, f"{type(exc).__name__}: {exc}")
+
+            # 卡片生成器：生成一张小测试图（没有 ImageMagick 就跳过，不算失败）
+            if shutil.which("magick") is None:
+                skip("卡片工具：能生成彩色测试图", "这台机器没有 ImageMagick")
+            else:
+                try:
+                    import tempfile as _tf2
+                    card = Path(_tf2.mkdtemp(prefix="ddp-card-")) / "card.png"
+                    done = subprocess.run(
+                        [sys.executable, str(ROOT / "tools" / "display-cards.py"),
+                         "testcard", "--out", str(card), "--width", "320", "--height", "200"],
+                        capture_output=True, timeout=180,
+                    )
+                    okc = done.returncode == 0 and card.exists() and card.stat().st_size > 1000
+                    record("卡片工具：能生成彩色测试图（320x200）", okc,
+                           f"退出码 {done.returncode}，{card.stat().st_size if card.exists() else 0} 字节")
+                except Exception as exc:                              # noqa: BLE001
+                    record("卡片工具：能生成彩色测试图", False, f"{type(exc).__name__}: {exc}")
+
             m = re.search(r"接口契约（v([0-9.]+)", CONTRACT.read_text(encoding="utf-8"))
             cver = m.group(1) if m else "?"
             pver = str(pkg.get("version"))

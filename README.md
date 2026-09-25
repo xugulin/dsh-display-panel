@@ -290,6 +290,32 @@ curl -s -X POST 'http://127.0.0.1:<DSH端口>/api/dsh-display-panel/exec?session
 | `DSH_VIEW_FORCE` | 关 | 脚本 | `1` = 允许覆盖"不是本包装的"同名单元（等价 `--force`） |
 | `PYTHON` | 自动 | 脚本 | 脚本与服务用的解释器 |
 
+## 把东西显示到会话显示器上（随包工具）
+
+每个会话有自己的显示器，而宿主的 HTTP 接口可以**指定任意会话** —— 所以"往另一块屏上放东西"
+是可行的。随包两个脚本把常用动作固化了（完整命令与三个真实用例见
+[docs/EXAMPLES.md](docs/EXAMPLES.md)）：
+
+| 脚本 | 干什么 |
+|---|---|
+| `tools/display-cards.py testcard` | 生成**彩色测试图**（彩条 + 等离子彩带 + 灰阶 + 七色圆点）—— 看色偏/缩放/压缩伪影，也是验证"静止带宽 0"的好素材 |
+| `tools/display-cards.py quote` | 生成**文字卡片**（深色渐变 + 中日韩大字，可多行 + 副标题 + 页脚） |
+| `tools/display-cards.py show` | 把任意图片**无边框全屏**铺到某台显示上（用 `ffplay`；ImageMagick 的 `display -window root` 在 Xvfb 上是静默失败的） |
+| `tools/session-wall.py` | **实时会话墙**：读会话自己的记录（zstd JSONL），把用户/助手/工具/团队事件实时动画显示到那台显示器上（`● LIVE` 脉冲点、按类型配色、底部扫描线、新事件滑入） |
+
+```bash
+# 生成一张彩色测试图并铺到当前会话的显示器上
+python3 tools/display-cards.py testcard --out /tmp/card.png
+python3 tools/display-cards.py show /tmp/card.png          # DISPLAY 由 display_panel_run / 宿主 exec 提供
+
+# 实时会话墙（--dry-run 只解析记录，不需要 X）
+python3 tools/session-wall.py --file "<会话记录>" --dry-run
+python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --sid session-xxxx
+```
+
+> 想铺到**别的**会话：`POST /api/dsh-display-panel/exec?session=<目标会话 id>`（body `{"argv":[…],"wait":false}`）。
+> 用 curl 调它需要 GUI 的 cookie，写法见 [docs/EXAMPLES.md](docs/EXAMPLES.md)。
+
 ## HTTP 接口
 
 ### 宿主半边（**同源**，面板只走这些）
