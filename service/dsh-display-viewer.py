@@ -2031,20 +2031,52 @@ def _type_text(sess: Session, text: str) -> None:
         return
     if shutil.which("xclip") is None:
         raise RuntimeError("缺 xclip，中文等非 ASCII 文本打不进去（安装：xclip）")
-    # ⚠️ xclip 必须给 ``-l``（服务若干次选区请求后再退出）：Qt 读剪贴板是**分几次请求**的
+
+    # ⚠️ xclip 必须给 ``-l``（服务若干次选区请求后再退出）：目标应用读剪贴板是**分几次请求**的
     # （先问 TARGETS、再取数据），默认只服务一次就退出 → 数据还没取到就没主了，
-    # 表现为"Ctrl+V 什么都没粘上"（这就是我上一版失败的原因）。
-    # 又因为它会驻留，不能用 subprocess.run 等它 —— 用 Popen 喂完 stdin 就走。
-    try:
-        proc = subprocess.Popen(["xclip", "-selection", "clipboard", "-l", "20"],
-                                env=sess.env, stdin=subprocess.PIPE,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        proc.stdin.write(text.encode("utf-8"))
-        proc.stdin.close()
-    except Exception as exc:                         # noqa: BLE001
-        raise RuntimeError(f"xclip 异常：{type(exc).__name__}: {exc}")
-    time.sleep(0.4)                                  # 等选区真正建立
-    run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+    # 表现为"Ctrl+V 什么都没粘上"。
+    #
+    # ⚠️⚠️ 但"喂完 stdin + sleep 0.4 就按 Ctrl+V"仍然是个**竞态** ——
+    # 高负载机器（CI 的共享 runner、正在编译的笔记本）上 xclip 还没拿到选区所有权，
+    # 粘贴就已经发出去了，于是中文"打不进去"。实测：同一份代码前两轮 CI 绿、第三轮红，
+    # 而且失败时目标里只有前一条 ASCII 文本 —— 典型竞态。
+    # 所以这里改成**确认选区真的可读**（xclip -o 能读回我们要的文本）再粘贴；
+    # 读不回来就换更大的 -l 重试一次，仍不行则明确报错（而不是静默粘不上）。
+    key = text.encode("utf-8")
+    last = "(还没试)"
+    for serve in ("20", "200"):
+        prev = getattr(sess, "clip_proc", None)
+        if prev is not None:
+            try:
+                prev.kill()                          # 换新文本：老的选区主人让位，别堆积
+            except Exception:                        # noqa: BLE001
+                pass
+        try:
+            proc = subprocess.Popen(["xclip", "-selection", "clipboard", "-l", serve],
+                                    env=sess.env, stdin=subprocess.PIPE,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc.stdin.write(key)
+            proc.stdin.close()
+        except Exception as exc:                     # noqa: BLE001
+            raise RuntimeError(f"xclip 异常：{type(exc).__name__}: {exc}")
+        sess.clip_proc = proc
+
+        # 轮询到"读回来就是我们写的"为止（最多 ~2.5 秒；本机通常 1~2 次就命中）
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            try:
+                got = subprocess.run(["xclip", "-selection", "clipboard", "-o"],
+                                     env=sess.env, capture_output=True, timeout=3)
+                if got.returncode == 0 and got.stdout == key:
+                    run_tool(sess, ["xdotool", "key", "--clearmodifiers", "ctrl+v"])
+                    return
+                last = repr(got.stdout[:60])
+            except subprocess.TimeoutExpired:
+                last = "xclip -o 超时"
+            except Exception as exc:                 # noqa: BLE001
+                last = f"{type(exc).__name__}: {exc}"
+            time.sleep(0.1)
+    raise RuntimeError(f"剪贴板没能建立（-l {serve}；xclip -o 读回 {last}）→ 中文没粘上")
 
 
 def _inject_darwin(sess: Session, obj: dict) -> None:

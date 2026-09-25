@@ -811,8 +811,23 @@ def dynamic_checks(viewer: Viewer) -> None:
     # D11 文本（中文：服务端走剪贴板 + Ctrl+V，靶程序自己实现粘贴）
     viewer.inject(sid_a, {"t": "text", "s": "中文显示器"})
     text = viewer.wait_log(sid_a, log_a, "中文显示器", timeout=8)
-    record("注入中文文本（剪贴板路径，契约 §1.3 text）", "中文显示器" in text,
-           repr(last_line_field(text, "LINE", "text"))[:120])
+    ok_cn = "中文显示器" in text
+    detail = repr(last_line_field(text, "LINE", "text"))[:120]
+    if not ok_cn:
+        # 失败时把"为什么"一起带上：CI 上这条曾偶发失败（xclip 还没拿到选区就粘贴），
+        # 当时只看到"目标里还是上一条文本"，无从定位 —— 现在顺手探测剪贴板状态。
+        try:
+            disp = (viewer.display_of(sid_a)["json"] or {}).get("display")
+            env = dict(os.environ)
+            if disp:
+                env["DISPLAY"] = disp
+            probe = subprocess.run(["xclip", "-selection", "clipboard", "-o"],
+                                   env=env, capture_output=True, timeout=5)
+            clip = probe.stdout.decode("utf-8", "replace")[:40] if probe.returncode == 0 else f"(rc={probe.returncode})"
+        except Exception as exc:                              # noqa: BLE001
+            clip = f"({type(exc).__name__})"
+        detail += f"；xclip 读回={clip!r}；xclip 在 PATH={shutil.which('xclip') is not None}"
+    record("注入中文文本（剪贴板路径，契约 §1.3 text）", ok_cn, detail)
 
     # D12 Backspace
     viewer.inject(sid_a, {"t": "key", "k": "Backspace"})
