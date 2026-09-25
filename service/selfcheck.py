@@ -38,6 +38,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 
 RESULTS: list = []          # (名称, "PASS"/"FAIL"/"SKIP", 详情)
@@ -208,6 +209,10 @@ def interface_checks(mod) -> None:
         except Exception:                              # noqa: BLE001
             cookie_ok = False
         check("只带 Cookie（不带 ?k=）也能访问", cookie_ok)
+        # 帧管线相关的 HTTP 断言（用桩会话：不碰显示、不起 Xvfb）——
+        # ⚠️ 必须在 shutdown() **之前**跑，否则请求会直接连不上（HTTP 0）
+        pipeline_interface_checks(mod, client, token)
+        keepalive_checks(mod, port, token)
         srv.shutdown()
     finally:
         mod.session = original_session
@@ -215,6 +220,296 @@ def interface_checks(mod) -> None:
     check("接口冒烟全程没有创建会话、没有拉起显示服务器",
           mod.session_count() == 0 and list(getattr(mod, "_spawned", [])) == [],
           f"sessions={mod.session_count()} spawned={len(getattr(mod, '_spawned', []))}")
+
+
+def pipeline_checks(mod, source: str) -> None:
+    """帧管线（契约 §5.2/§5.3/§5.5）：用**纯数据**断言，不需要 Xvfb、不产生副作用。
+
+    为什么值得这一组：这些点错了都不会报错，只会"表现不对" ——
+        CRC 去重写错     → 静止画面照样满带宽（用户投诉的就是这个）
+        part 头少一个    → 客户端丢帧/光标冻住，而服务端日志一片正常
+        档位校验不严     → quality=0 被静默夹成边界，调用方以为改成功了
+        编码器用多线程   → 首帧慢到 1-3 秒（帧级多线程把头几帧憋在内部缓冲里）
+    """
+    # ---- 档位默认值与取值范围（契约 §5.2）
+    check("默认档 quality=70 / fps=20 / scale=1（契约 §5.2；上限要高于验收线 15）",
+          (mod.DEFAULT_QUALITY, mod.DEFAULT_FPS, mod.DEFAULT_SCALE) == (70, 20, 1.0),
+          f"{mod.DEFAULT_QUALITY}/{mod.DEFAULT_FPS}/{mod.DEFAULT_SCALE}")
+    check("档位范围 quality 1..100、fps 1..30、scale 0.25..1.0",
+          (mod.MIN_QUALITY, mod.MAX_QUALITY, mod.MIN_FPS, mod.MAX_FPS,
+           mod.MIN_SCALE, mod.MAX_SCALE) == (1, 100, 1, 30, 0.25, 1.0), "")
+
+    # ---- stream-config 参数校验
+    base = {"quality": 70, "fps": 15, "scale": 1.0}
+    ok, err = mod.parse_stream_config({"quality": "55", "fps": 8, "scale": "0.5"}, base)
+    check("stream-config 合法值全部接受（字符串数字也认）",
+          err == "" and ok == {"quality": 55, "fps": 8, "scale": 0.5}, f"{ok} {err}")
+    ok2, err2 = mod.parse_stream_config({"profile": "saver", "reason": "客户端在省电"},
+                                        base)
+    check("stream-config 忽略未知键（客户端的 profile/reason、查询串里的 k=）",
+          err2 == "" and ok2 == base, f"{ok2} {err2}")
+    bad_values = [{"quality": 0}, {"quality": 999}, {"quality": "abc"},
+                  {"fps": 0}, {"fps": 99}, {"scale": 0.1}, {"scale": 1.5},
+                  {"scale": "x"}, {"quality": True}]
+    bad_ok = [p for p in bad_values
+              if mod.parse_stream_config(p, base)[1] == ""]
+    check("stream-config 非法值全部报错（0/999/abc/布尔/越界）", not bad_ok, str(bad_ok))
+    check("stream-config 只改给了的键（没给的 / null 的保持原值）",
+          mod.parse_stream_config({"fps": 5}, base)[0] == {"quality": 70, "fps": 5,
+                                                          "scale": 1.0}
+          and mod.parse_stream_config({"quality": None}, base) == (base, ""), "")
+
+    # ---- CRC32 去重
+    dedup = mod.FrameDedup()
+    frame_a = bytes(bytearray([7]) * (mod.DEDUP_CRC_ALWAYS + 16))
+    changed1, crc1 = dedup.check(frame_a)
+    changed2, crc2 = dedup.check(frame_a)
+    check("CRC32 去重：同一帧第二次不再算作变化（静止就不编码、不发帧）",
+          changed1 is True and changed2 is False and crc1 == crc2 == zlib.crc32(frame_a),
+          f"changed={changed1}/{changed2} crc={crc1}")
+    frame_b = bytearray(frame_a)
+    frame_b[-1] ^= 0xFF
+    changed3, crc3 = dedup.check(frame_b)
+    check("CRC32 去重：内容变了就放行（末尾一个字节不同也算）",
+          changed3 is True and crc3 != crc1, f"changed={changed3} crc={crc3}")
+    small = b"\xff\xd8jpeg-frame-1\xff\xd9"
+    d2 = mod.FrameDedup()
+    s1 = d2.check(small)
+    s2 = d2.check(small)
+    s3 = d2.check(small + b"x")
+    check("小帧（JPEG）走 CRC32 当键：一样→跳过、不一样→放行",
+          s1[0] is True and s2[0] is False and s3[0] is True, f"{s1} {s2} {s3}")
+
+    # ---- MJPEG part 头（契约 §5.3：四个头一个都不能少）
+    part = mod.mjpeg_part(b"\xff\xd8FAKE\xff\xd9", 42, 1730000000123, "1600x1000",
+                          {"x": 0.25, "y": 0.5})
+    head, _, body = part.partition(b"\r\n\r\n")
+    lines = head.decode("ascii").split("\r\n")
+    fields = dict(line.split(": ", 1) for line in lines[1:])
+    check("MJPEG part：--frame 边界 + Content-Type 正确",
+          lines[0] == "--frame" and fields.get("Content-Type") == "image/jpeg", lines[0])
+    check("MJPEG part：Seq/Time/Size/Cursor 四个逐帧头齐全（宿主只透传字节，"
+          "少一个客户端就少一样东西）",
+          all(k in fields for k in ("X-DSH-Seq", "X-DSH-Time", "X-DSH-Size",
+                                    "X-DSH-Cursor")), str(sorted(fields)))
+    check("MJPEG part：Content-Length 等于 JPEG 字节数（客户端按它定长取体）",
+          fields.get("Content-Length") == "8" and body == b"\xff\xd8FAKE\xff\xd9\r\n",
+          fields.get("Content-Length"))
+    check("MJPEG part：Seq/Time 是整数、Size 原样透传、Cursor 是归一化 x,y",
+          fields.get("X-DSH-Seq") == "42" and fields.get("X-DSH-Time") == "1730000000123"
+          and fields.get("X-DSH-Size") == "1600x1000"
+          and fields.get("X-DSH-Cursor") == "0.2500,0.5000", str(fields))
+    part_none = mod.mjpeg_part(b"\xff\xd8x\xff\xd9", 1, 1, "10x10", None)
+    check("MJPEG part：拿不到指针时 Cursor 是 -1,-1（客户端据此不画光标）",
+          b"X-DSH-Cursor: -1,-1" in part_none, "")
+
+    # ---- quality → ffmpeg -q:v
+    check("quality→-q:v 递减：quality 越高 q 越小（1..100 → 31..2）",
+          mod.quality_to_qv(1) == 31 and mod.quality_to_qv(100) == 2
+          and mod.quality_to_qv(70) < mod.quality_to_qv(30)
+          and 2 <= mod.quality_to_qv(70) <= 31,
+          f"70→{mod.quality_to_qv(70)} 30→{mod.quality_to_qv(30)}")
+
+    # ---- JPEG 尺寸解析（X-DSH-Size 靠它，import/win32 路线上只有字节）
+    # 手搓一张最小 JPEG：SOI + APP0（长度必须和载荷对得上）+ SOF0 + EOI
+    fake = (b"\xff\xd8"
+            + b"\xff\xe0" + (16).to_bytes(2, "big") + b"JFIF\0" + b"\x00" * 9
+            + b"\xff\xc0" + (17).to_bytes(2, "big") + b"\x08"
+            + (500).to_bytes(2, "big") + (800).to_bytes(2, "big") + b"\x03" + b"\x00" * 9
+            + b"\xff\xd9")
+    check("jpeg_size 能从 SOF0 段读出 (宽,高)", mod.jpeg_size(fake) == (800, 500),
+          str(mod.jpeg_size(fake)))
+    check("jpeg_size 对非 JPEG 数据返回 None（不瞎猜）",
+          mod.jpeg_size(b"not-a-jpeg") is None and mod.jpeg_size(b"") is None, "")
+
+    # ---- 抓帧/编码实现的关键约束（静态断言）
+    check("抓帧走 ctypes + libX11 的 XGetImage（不是每帧 spawn import）",
+          all(name in source for name in ("XGetImage", "class X11Screen", "XQueryPointer")),
+          "")
+    check("XImage 按 bytes_per_line 解析（深屏行对齐不能当紧凑排列）",
+          "bytes_per_line" in source and "bits_per_pixel" in source, "")
+    check("XGetImage 的返回按 data+image 两步释放（XDestroyImage 是宏，libX11 里没这个符号）",
+          "XDestroyImage(" not in source and "lib.XFree(data)" in source
+          and "lib.XFree(img)" in source, "")
+    check("编码器必须 -threads 1（帧级多线程会把头几帧憋到 3 秒才出）",
+          '"-threads", "1"' in source and "帧级多线程" in source, "")
+    check("damage 驱动 + 没有 XDamage 时退回轮询",
+          "XDamageCreate" in source and "xgetimage+XDamage" in source
+          and "xgetimage+poll" in source and "IDLE_FPS" in source, "")
+    check("回退路径没删：import / grim / win32 / darwin 都还在",
+          "_grab_once" in source and "grim" in source and "win_screen" in source
+          and "_grab_darwin" in source, "")
+    check("自适应降档顺序 fps → scale → quality，且写进 /stats.reason",
+          all(k in source for k in ('self.auto["fps"]', 'self.auto["scale"]',
+                                    'self.auto["quality"]', "self.reason")), "")
+    check("帧管线随会话回收（Session.stop 先停管线、再杀 Xvfb）",
+          "self.pipe.stop()" in source and "帧管线收手" in source, "")
+    check("keep-alive 下抽干未读 body（否则下一条请求会 501；curl 复现不出来）",
+          "_drain_request_body" in source and "BODY_DRAIN_MAX" in source, "")
+
+    # ---- /stats 字段（契约 §5.5）——用一个真 Pipeline 对象（不建会话、不起线程）
+    try:
+        probe = mod.Session("selfcheck-stats")
+        try:
+            data = mod.stats_payload("selfcheck-stats", probe)
+            need = ("fps", "captured", "encoded", "skipped", "bytesPerSec", "quality",
+                    "scale", "mode", "captureMs", "encodeMs", "cursor", "reason")
+            check("/stats 含契约 §5.5 的全部字段",
+                  not [k for k in need if k not in data],
+                  "缺: " + str([k for k in need if k not in data]))
+            check("/stats 默认档就是契约的默认值",
+                  (data["quality"], data["scale"]) == (mod.DEFAULT_QUALITY,
+                                                       mod.DEFAULT_SCALE),
+                  f"{data['quality']}/{data['scale']}")
+            check("/stats.mode 用约定词表（perf 脚本按它断言）",
+                  data["mode"] in ("xgetimage+XDamage", "xgetimage+poll", "import", "grim",
+                                   "win32", "darwin", "idle"), data["mode"])
+            check("/stats 的额外字段（clients/damageEvents/lastFrameAgeMs/stream）也齐",
+                  all(k in data for k in ("clients", "damageEvents", "lastFrameAgeMs",
+                                          "stream", "encoder", "cursorOnly", "seq")),
+                  str(sorted(data)))
+            empty = mod.stats_payload("selfcheck-none", None)
+            check("没有会话时 /stats 给默认档零计数（**不创建会话**）",
+                  empty["captured"] == 0 and empty["quality"] == mod.DEFAULT_QUALITY
+                  and empty["mode"] == "idle", f"{empty['mode']} {empty['quality']}")
+        finally:
+            probe.pipe.stop(timeout=0.1)
+            mod.release_display(probe.sid, probe.number, forget=True)
+    except Exception as exc:                             # noqa: BLE001
+        check("帧管线自检（/stats 字段）", False, f"{type(exc).__name__}: {exc}")
+
+
+class _StubPipe:
+    """给接口冒烟用的假管线：只回答 HTTP 层问到的几个问题（**不碰显示、不起线程**）。"""
+
+    def __init__(self, frame=b"", defaults=None):
+        self.frame = frame
+        self.watched = 0
+        self.defaults = dict(defaults or {})
+        self.config = dict(self.defaults)
+
+    def watch(self):
+        self.watched += 1
+
+    def cached_cursor(self, max_age=1.0):
+        return {"x": 0.5, "y": 0.5}
+
+    def effective_config(self):
+        return dict(self.config)
+
+    def stats(self):
+        return {"fps": 0.0, "captured": 0, "encoded": 0, "skipped": 0, "bytesPerSec": 0.0,
+                "quality": self.config.get("quality"), "scale": self.config.get("scale"),
+                "mode": "idle", "captureMs": 0.0, "encodeMs": 0.0, "cursor": None,
+                "reason": "", "clients": 0}
+
+    def set_config(self, cfg):
+        self.config = dict(cfg)
+        return dict(cfg)
+
+    def encode_shot(self, quality, scale):
+        return self.frame
+
+
+class _StubSession:
+    """``/snapshot`` 与 ``/stream-config`` 的桩会话（**不碰显示、不起 Xvfb**）。"""
+
+    def __init__(self, frame=b"", defaults=None):
+        self.sid = "stub"
+        self.dir = tempfile.gettempdir()
+        self.display = ":0"
+        self.number = 0
+        self.started = True
+        self.latest = frame
+        self.frame_error = None
+        self.pipe = _StubPipe(frame, defaults)
+        self.shots = []
+
+    def ensure(self):
+        return True
+
+    def touch(self):
+        pass
+
+    def snapshot_jpeg(self, quality=None, scale=None):
+        self.shots.append((quality, scale))
+        return self.latest
+
+
+def pipeline_interface_checks(mod, client, token) -> None:
+    """HTTP 层的几条硬要求：参数非法不 5xx、keep-alive 不被 body 污染、没帧要 503。"""
+    original = mod.session
+    defaults = {"quality": mod.DEFAULT_QUALITY, "fps": mod.DEFAULT_FPS,
+                "scale": mod.DEFAULT_SCALE}
+    stub_empty = _StubSession(b"", defaults)
+    stub_full = _StubSession(b"\xff\xd8stub-jpeg\xff\xd9", defaults)
+    try:
+        mod.session = lambda sid: stub_full
+        status, body, headers, _v = client.get("/s/stub/snapshot", token)
+        check("/snapshot 不带参数 → 200 + image/jpeg",
+              status == 200 and headers.get("Content-Type") == "image/jpeg", f"HTTP {status}")
+        status, _b, _h, _v = client.get("/s/stub/snapshot?quality=90&scale=0.5", token)
+        check("/snapshot?quality=90&scale=0.5 → 单独编一帧（参数真的传下去）",
+              status == 200 and stub_full.shots[-1] == (90, 0.5),
+              f"HTTP {status} shots={stub_full.shots[-3:]}")
+        for bad in ("quality=0", "quality=999", "quality=abc", "scale=0.1", "scale=abc",
+                    "quality=-5&scale=99"):
+            status, _b, _h, _v = client.get(f"/s/stub/snapshot?{bad}", token)
+            if status != 200:
+                break
+        check("/snapshot 参数非法时忽略并按默认走（要 200，不能 4xx/5xx）", status == 200,
+              f"HTTP {status}（{bad}）")
+        check("/snapshot 非法参数走后不重新编码（当作没给）",
+              stub_full.shots[-1] == (None, None), str(stub_full.shots[-1]))
+        mod.session = lambda sid: stub_empty
+        status, _b, _h, _v = client.get("/s/stub/snapshot", token)
+        check("/snapshot 没有帧 → 立刻 503（不阻塞）", status == 503, f"HTTP {status}")
+        status, body, _h, _v = client.get("/s/stub/stats", token)
+        check("/stats 在会话存在时返回 200 + §5.5 字段",
+              status == 200 and "bytesPerSec" in json.loads(body or b"{}"), f"HTTP {status}")
+    finally:
+        mod.session = original
+
+
+def keepalive_checks(mod, port: int, token: str) -> None:
+    """keep-alive 连接上"带 body 的错误请求"不能污染下一条请求（真 bug，实测 501）。
+
+    为什么单列：``protocol_version = HTTP/1.1`` 下 Python 的 http.server **不会**替你读
+    body，出错分支直接回 404 就会把 body 留成下一条请求的起始行 ——
+    curl 不复用连接所以看不出来，Node/undici 与浏览器 fetch 会。
+    这条测试**故意用同一条连接发两个请求**。
+    """
+    import http.client
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        seen = []
+        for method, path, payload in (
+                ("POST", f"/s/selfcheck-keepalive/stream-config-typo?k={token}",
+                 {"quality": 70, "fps": 15, "scale": 1.0}),
+                ("POST", f"/s/selfcheck-keepalive/nope?k={token}", {"x": "y" * 300}),
+                ("POST", f"/s/selfcheck-keepalive/stream-config?k={token}", {"quality": 0}),
+                ("DELETE", f"/s/selfcheck-keepalive/nope?k={token}", {"x": 1})):
+            conn.request(method, path, body=json.dumps(payload),
+                         headers={"Content-Type": "application/json"})
+            first = conn.getresponse()
+            first.read()
+            seen.append(first.status)
+            conn.request("GET", f"/health?k={token}")
+            second = conn.getresponse()
+            raw = second.read()
+            if second.status not in (200, 403):
+                check("keep-alive：带 body 的错误请求之后，同连接的下一条请求正常",
+                      False, f"{method} → {first.status}，随后 GET /health → "
+                             f"{second.status} {raw[:120]!r}")
+                return
+        check("keep-alive：带 body 的错误请求之后，同连接的下一条请求正常（4 种错误路径）",
+              True, f"错误码 {seen}，随后都是 200")
+    except Exception as exc:                             # noqa: BLE001
+        check("keep-alive：带 body 的错误请求之后，同连接的下一条请求正常",
+              False, f"{type(exc).__name__}: {exc}")
+    finally:
+        conn.close()
 
 
 def main() -> int:
@@ -389,6 +684,36 @@ def main() -> int:
     except Exception as exc:                             # noqa: BLE001
         check("页面渲染", False, f"{type(exc).__name__}: {exc}")
 
+    # ---- 帧管线（契约 §5.2/§5.3/§5.5，纯数据断言，不需要 GUI）
+    pipeline_checks(mod, source)
+
+    # ---- 会话回收：/exec 子进程必须真的被杀掉、stop() 一步失败不许拖累后面的步骤
+    # （0.3.4 拿 procs_snapshot() 的 dict 列表当三元组解包：只要会话里跑过 /exec，
+    #   /close 就抛 AttributeError → 子进程没杀、Xvfb 没停、显示号没释放、响应为空）
+    try:
+        probe = mod.Session("selfcheck-recycle")
+        # ⚠️ start_new_session：_terminate_proc 杀的是**整个进程组**，
+        #    不隔离的话这一测会把自检自己（以及 CI 的 shell）一起带走（实测踩过）。
+        victim = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                  start_new_session=True)
+        probe.procs = [(victim, ["sleep"], 0.0)]
+        snapshot = probe.procs_snapshot()
+        check("procs_snapshot 返回 dict 列表、procs_live 返回三元组（回收用后者）",
+              isinstance(snapshot, list) and snapshot
+              and isinstance(snapshot[0], dict) and snapshot[0].get("pid") == victim.pid
+              and all(hasattr(p, "poll") for p, _a, _t in probe.procs_live()),
+              str(snapshot)[:80])
+        probe.stop()
+        check("Session.stop() 真的杀掉了 /exec 子进程（旧实现抛异常直接跳过这一步）",
+              victim.poll() is not None, f"poll={victim.poll()}")
+        check("Session.stop() 不抛异常（每一步都自己兜住）", True, "")
+        if victim.poll() is None:
+            victim.kill()
+        mod.release_display(probe.sid, probe.number, forget=True)
+    except Exception as exc:                             # noqa: BLE001
+        check("会话回收（/exec 子进程 + stop() 健壮性）", False,
+              f"{type(exc).__name__}: {exc}")
+
     # ---- 平台相关
     if mod.IS_WIN:
         check("后端解析为 win32", mod.BACKEND == "win32", mod.BACKEND)
@@ -457,8 +782,9 @@ def main() -> int:
                   mod._xdotool_key("ctrl+ArrowUp") == "ctrl+Up", mod._xdotool_key("ctrl+ArrowUp"))
         check("DOM 鼠标键号 → xdotool 键号（1 左 2 中 3 右）",
               [mod._x11_button(b) for b in (1, 2, 3)] == ["1", "3", "2"], "")
-        check("抓帧间隔 0.5s（X11 每次都要起外部进程）", mod.GRAB_INTERVAL == 0.5,
-              mod.GRAB_INTERVAL)
+        check("X11 抓帧走进程内 XGetImage（GRAB_INTERVAL 只剩余失败退避与 win32/darwin）",
+              mod.GRAB_INTERVAL == 0.5 and "XGetImage" in source
+              and "libXdamage" in source, mod.GRAB_INTERVAL)
         has_xclip = shutil.which("xclip") is not None
         if has_xclip:
             check("中文走剪贴板（xclip -l 20）",

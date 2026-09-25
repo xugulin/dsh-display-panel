@@ -62,7 +62,8 @@
 * **去重**：内容没变就不编码、不发帧（``/stats.skipped`` 涨、带宽趋近 0）；
   只有指针动了才重发**缓存的那张 JPEG**（上限 5fps，客户端的光标才不会冻住）。
 * **自适应**：``quality``(1..100) / ``fps``(1..30) / ``scale``(0.25..1.0)，
-  默认 70/15/1；``POST /s/<sid>/stream-config`` 可改。抓不动或编不过来时
+  默认 70/20/1（上限留出余量，见下）；``POST /s/<sid>/stream-config`` 可改。
+  抓不动或编不过来时
   **先降 fps → 再降 scale → 最后降 quality**，原因写进 ``/stats.reason``；
   闲下来（连续 5 秒远低于预算）再逐档回升。降档只动服务端自己的 ``auto``，
   客户端设的目标档永远保留。
@@ -134,6 +135,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 import zlib
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -190,7 +192,10 @@ GRAB_INTERVAL = {"win32": 0.12, "darwin": 0.3}.get(BACKEND, 0.5)
 
 # ---------------------------------------------------------------- 流畅度档位（契约 §5.2/§5.5）
 #: 默认档：客户端/宿主不调 /stream-config 时就用它。
-DEFAULT_QUALITY, DEFAULT_FPS, DEFAULT_SCALE = 70, 15, 1.0
+#: ⚠️ fps 默认 20 而不是验收线 15：**验收线不该同时是上限** ——
+#: 上限=15 意味着调度抖动（实测约 2.3%）直接吃掉余量，稳定跑出 14.6 < 15。
+#: 默认 20 时实测 18~19fps，静止/抓不动时自适应会自己降回 12~15。
+DEFAULT_QUALITY, DEFAULT_FPS, DEFAULT_SCALE = 70, 20, 1.0
 MIN_QUALITY, MAX_QUALITY = 1, 100
 MIN_FPS, MAX_FPS = 1, 30
 MIN_SCALE, MAX_SCALE = 0.25, 1.0
@@ -200,8 +205,15 @@ ADAPT_MIN_QUALITY = 20
 ADAPT_BUDGET_RATIO = 0.6
 #: 两次降档之间的冷却（秒）：降一档要等它生效再看，否则一次抖动就一路降到底。
 ADAPT_COOLDOWN = 2.0
-#: 连续这么长时间"很闲"才回升一档（防止在阈值附近来回抖）。
-ADAPT_RECOVER_HOLD = 5.0
+#: 连续几次评估都"跟不上"才真降档（一次抖动不算：机器上还有别的活儿在抢 CPU）。
+ADAPT_STRIKES = 2
+#: 多久没有内容变化就算"空闲"：空闲窗口**不参与自适应**（没有帧不等于处理不过来）。
+IDLE_GATE = 2.0
+#: 恢复时每次给 fps 加多少、隔多久加一次（有滞回地往上爬，直到客户端设的上限）。
+ADAPT_RECOVER_FPS = 2
+ADAPT_RECOVER_EVERY = 2.0
+#: 恢复的余量判据：一帧总耗时低于帧周期的这个比例才敢往上加。
+ADAPT_HEADROOM = 0.6
 #: 画面静止时：没有 XDamage 时的兜底轮询节奏。
 IDLE_FPS = 4
 #: 画面静止时：有 XDamage 时的兜底巡检间隔（秒）—— 万一某次变化没产生 damage
@@ -250,6 +262,10 @@ SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 INPUT_TYPES = ("click", "down", "up", "move", "wheel", "text", "key")
 #: 每会话输入队列上限：满了宁可报错，也不要无限堆积。
 INPUT_QUEUE_MAX = 512
+#: 一个请求最多读多少 body 字节（超出部分由 _drain_request_body 抽干或直接关连接）。
+BODY_READ_MAX = 1024 * 1024
+#: 收尾抽干 body 的上限：超过就关连接（绝不为恶意巨型 body 陪跑）。
+BODY_DRAIN_MAX = 64 * 1024
 #: 显示号范围。
 DISPLAY_BASE = 100
 DISPLAY_SPAN = 300
@@ -1319,6 +1335,12 @@ def _terminate_proc(proc: subprocess.Popen, timeout: float = 3.0) -> None:
             proc.kill()
         except Exception:                            # noqa: BLE001
             pass
+    try:
+        # SIGKILL 之后还要 wait 一次，否则子进程会留成僵尸（实测 /close 之后
+        # ps 里挂着一个 [ffmpeg] <defunct>）。
+        proc.wait(timeout=1.0)
+    except Exception:                                # noqa: BLE001
+        pass
 
 
 # ================================================================ 会话
@@ -1632,20 +1654,33 @@ class Session:
             self.events.put_nowait(None)             # 让 worker 退出
         except queue.Full:
             pass
-        for proc, _argv, _at in self.procs_snapshot():
-            _terminate_proc(proc, timeout=2.0)
-        with self.proc_lock:
-            self.procs = []
-        proc = self._server_proc
-        if proc is not None:
-            _unregister_spawn(proc)
-            _terminate_proc(proc, timeout=3.0)
-            self._server_proc = None
+        # ⚠️ 每一步都自己兜住异常：回收路径上任何一步失败都不许拖累后面的步骤
+        #    （0.3.4 就是在这里抛出 AttributeError，导致 Xvfb 不回收、显示号不释放）。
+        try:
+            for proc, _argv, _at in self.procs_live():
+                _terminate_proc(proc, timeout=2.0)
+            with self.proc_lock:
+                self.procs = []
+        except Exception as exc:                     # noqa: BLE001
+            print(f"[{self.sid}] 回收 /exec 子进程出错（继续回收）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
+        try:
+            proc = self._server_proc
+            if proc is not None:
+                _unregister_spawn(proc)
+                _terminate_proc(proc, timeout=3.0)
+                self._server_proc = None
+        except Exception as exc:                     # noqa: BLE001
+            print(f"[{self.sid}] 停显示服务器出错（继续回收）："
+                  f"{type(exc).__name__}: {exc}", flush=True)
         self.started = False
         self._alive_ok = False
         self._alive_at = 0.0
         if release:
-            release_display(self.sid, self.number, forget=forget)
+            try:
+                release_display(self.sid, self.number, forget=forget)
+            except Exception as exc:                 # noqa: BLE001
+                print(f"[{self.sid}] 释放显示号出错：{type(exc).__name__}: {exc}", flush=True)
 
     @property
     def env(self) -> dict:
@@ -1732,16 +1767,25 @@ class Session:
         self.touch()
         return proc
 
-    def procs_snapshot(self) -> list:
+    def procs_live(self) -> list:
+        """还活着的 ``(Popen, argv, started)`` 三元组 —— **回收路径用这个**。
+
+        ⚠️ 别拿 :meth:`procs_snapshot` 去做回收：它返回的是给 ``/procs`` 用的
+        **dict 列表**，按三元组解包会解出 ``"pid"`` 这种字符串。0.3.4 就是这么写的，
+        后果是"只要会话里跑过 ``/exec`` 程序，``/close``/``DELETE`` 就整个崩掉"：
+        ``AttributeError: 'str' object has no attribute 'poll'`` ——
+        子进程没杀、Xvfb 没停、显示号没释放，用户还拿到一个空响应（实测复现过）。
+        """
         with self.proc_lock:
-            alive, out = [], []
-            for proc, argv, started in self.procs:
-                if proc.poll() is None:
-                    alive.append((proc, argv, started))
-                    out.append({"pid": proc.pid, "argv": list(argv),
-                                "startedAt": round(started, 3)})
+            alive = [(proc, argv, started) for proc, argv, started in self.procs
+                     if proc.poll() is None]
             self.procs = alive
-            return out
+            return alive
+
+    def procs_snapshot(self) -> list:
+        """``/procs`` 的 JSON 视图（**dict 列表，不是三元组**；见 :meth:`procs_live`）。"""
+        return [{"pid": proc.pid, "argv": list(argv), "startedAt": round(started, 3)}
+                for proc, argv, started in self.procs_live()]
 
     def kill_pid(self, pid: int) -> bool:
         with self.proc_lock:
@@ -2567,6 +2611,9 @@ class FfmpegEncoder:
         self.log_path = log_path
         self.proc = None
         self.last_ms = 0.0
+        #: 管线要收手时置上：编码读循环按 0.2 秒切片检查它，能立刻退出 ——
+        #: 否则 Session.stop() 的 join 会等满 ENCODE_TIMEOUT，回收线程只能硬来。
+        self.stop_event = threading.Event()
         self.out_w, self.out_h = self._out_size()
 
     def _out_size(self):
@@ -2637,9 +2684,13 @@ class FfmpegEncoder:
         while True:
             if len(data) >= 4 and data[-2:] == b"\xff\xd9":
                 return bytes(data)
-            left = deadline - time.monotonic()
+            if self.stop_event.is_set():
+                raise EncoderGone("管线正在收手")
+            left = min(deadline - time.monotonic(), 0.2)
             if left <= 0:
-                raise EncoderGone(self._why("取一帧 JPEG 超时"))
+                if time.monotonic() >= deadline:
+                    raise EncoderGone(self._why("取一帧 JPEG 超时"))
+                continue
             try:
                 ready, _w, _x = select.select([fd], [], [], left)
             except (OSError, ValueError) as exc:
@@ -2668,6 +2719,7 @@ class FfmpegEncoder:
                (f"：{tail}" if tail else "")
 
     def stop(self) -> None:
+        self.stop_event.set()                        # 让正在读 JPEG 的循环立刻退出
         proc, self.proc = self.proc, None
         if proc is None:
             return
@@ -2843,6 +2895,9 @@ class Pipeline:
         self.idle_fps = IDLE_FPS_SLOW
         self.captured = self.encoded = self.skipped = self.cursor_only = 0
         self.capture_ms = self.encode_ms = 0.0
+        #: 最近若干帧的耗时（用来暴露"平均很好看、偶尔卡 400ms"的情况）
+        self.recent_cap = deque(maxlen=32)
+        self.recent_enc = deque(maxlen=32)
         self.crc = 0
         self.sent = deque()                          # 出帧时刻（fps 窗口）
         self.rate = deque()                          # 出帧时刻（自适应判据，2s 窗口）
@@ -2856,6 +2911,8 @@ class Pipeline:
         self.next_capture = 0.0
         self.last_adapt = 0.0
         self.calm_since = 0.0
+        self.over_strikes = 0
+        self.idle = True
         self._damage_seen = 0
         self._warm = 0
         self._no_encoder = False
@@ -2967,6 +3024,7 @@ class Pipeline:
             self.reason = ""
             self.last_adapt = time.monotonic()       # 给新档一个冷却期再评判
             self.calm_since = 0.0
+            self.over_strikes = 0
             self.cond.notify_all()
         self._notify()
         return dict(self.config)
@@ -3016,6 +3074,12 @@ class Pipeline:
         byps = round(sum(n for _t, n in self.sent_bytes) / STATS_WINDOW, 1)
         return {
             "fps": fps,
+            # fpsCap 是**控制器压着的上限**（客户端设的档经过自适应降档之后），
+            # fpsActual 是实测出来的：裁判脚本靠这两个数区分"管线达不到"与"控制器压着"。
+            "fpsCap": cfg["fps"],
+            "fpsActual": fps,
+            "userFps": self.config["fps"],
+            "idle": bool(self.idle),
             "captured": self.captured,
             "encoded": self.encoded,
             "skipped": self.skipped,
@@ -3025,8 +3089,12 @@ class Pipeline:
             "mode": self.mode,
             "captureMs": round(self.capture_ms, 2),
             "encodeMs": round(self.encode_ms, 2),
+            "captureMaxMs": round(max(self.recent_cap), 1) if self.recent_cap else 0.0,
+            "encodeMaxMs": round(max(self.recent_enc), 1) if self.recent_enc else 0.0,
             "cursor": dict(self.cursor) if self.cursor else None,
-            "reason": self.reason,
+            # reason 只在空闲时补一句"空闲（无变化）"：不能把"没有帧"写成"跟不上"，
+            # 那正是旧版在静止时把自己降档、用户一动只剩 9fps 的原因。
+            "reason": self.reason_text(),
             # ---- 0.4.0 扩展（perf 脚本与客户端状态条会用；契约 §5.5 的字段一个不少）
             "encoder": self.encoder_name(),
             "cursorOnly": self.cursor_only,
@@ -3038,10 +3106,20 @@ class Pipeline:
                                if self.last_sent_at else None),
             "targetFps": cfg["fps"],
             "idleFps": self.idle_fps,
+            "damageAgoMs": (int((time.time() - self.damage_times[-1]) * 1000)
+                            if self.damage_times else None),
             "costMs": round(self.capture_ms + self.encode_ms, 2),
-            "stream": {"fps": fps, "quality": cfg["quality"], "scale": cfg["scale"],
-                       "mode": self.mode},
+            "stream": {"fps": fps, "fpsCap": cfg["fps"], "quality": cfg["quality"],
+                       "scale": cfg["scale"], "mode": self.mode},
         }
+
+    def reason_text(self) -> str:
+        """``/stats.reason``：自适应说明；空闲时明说"空闲（无变化）"。"""
+        if not self.idle:
+            return self.reason
+        if self.reason and any(self.auto.values()):
+            return f"{self.reason}（当前空闲/无变化）"
+        return "空闲（无变化）"
 
     def encoder_name(self) -> str:
         if self.encoder is not None:
@@ -3079,6 +3157,10 @@ class Pipeline:
         return recode_jpeg(jpeg, quality, scale) or jpeg
 
     # ---------------------------------------------------------------- 线程主体
+    def _is_idle(self) -> bool:
+        """最近有没有内容变化（空闲 = 没有帧可出，**不等于**处理不过来）。"""
+        return (time.monotonic() - self.last_change) > IDLE_GATE
+
     def _pump(self) -> None:
         """一轮：等变化 → 抓帧 → 去重 → 编码 → 广播（异常交给 run() 兜）。
 
@@ -3091,12 +3173,25 @@ class Pipeline:
         now = time.monotonic()
         if now < self.next_capture:
             # 还没到出帧的点：等 damage / 通知（也会按指针的节拍醒来）
-            self._wake(min(self.next_capture - now, self._cursor_wait()))
+            hit = self._wake(min(self.next_capture - now, self._cursor_wait()))
             self._cursor_tick()
             self._cursor_frame()
+            if hit and self._is_idle():
+                # 空闲巡检（1fps）中来了变化：**立刻**抓这一帧，别等巡检节拍 ——
+                # 否则"上一秒还很安静、这一刻刚动"的画面最多要等 1 秒才出去。
+                self.next_capture = 0.0
             return
         self._ensure_sources(cfg)
         cfg = self.effective_config()                # _ensure_sources 可能改了档（没 ffmpeg）
+        idle = self._is_idle()
+        if self.idle and not idle:
+            # 空闲结束：上一段空闲里的耗时样本（尤其是编码进程冷启动那一帧）
+            # 不该拿来评判"现在跟不跟得上" —— 清了重测，第一帧就按原上限出。
+            self.capture_ms = self.encode_ms = 0.0
+            self.over_strikes = 0
+            self.calm_since = 0.0
+            self.last_adapt = time.monotonic()
+        self.idle = idle
         epoch_ms = int(time.time() * 1000)
         t0 = time.perf_counter()
         self.last_capture_at = time.monotonic()
@@ -3114,13 +3209,21 @@ class Pipeline:
             if jpeg:
                 self.last_change = time.monotonic()
                 self._publish(jpeg, epoch_ms, size, cursor_only=False)
-        self.capture_ms = _ewma(self.capture_ms, cap_ms)
-        if enc_ms:
-            self.encode_ms = _ewma(self.encode_ms, enc_ms)
+        # α 取小一点：单帧抖动不该在 EWMA 里留很久（自适应另有一道 strikes 防线）。
+        # _warm > 0 的帧（编码进程刚起/刚重启）不采样：那一帧带着进程冷启动。
+        if self._warm <= 0:
+            self.capture_ms = _ewma(self.capture_ms, cap_ms, 0.2)
+            self.recent_cap.append(cap_ms)
+            if enc_ms:
+                self.encode_ms = _ewma(self.encode_ms, enc_ms, 0.2)
+                self.recent_enc.append(enc_ms)
         self._cursor_tick()
         self._cursor_frame()
         self._schedule(cfg)
-        self._adapt(cfg, cap_ms, enc_ms)
+        if not idle:
+            # 空闲窗口不参与自适应（没有帧 ≠ 处理不过来）。
+            # 旧行为就是在静止时把自己一路降档，等用户真动起来只剩 9fps。
+            self._adapt(cfg, cap_ms, enc_ms)
 
     def run(self) -> None:
         sess = self.sess
@@ -3210,8 +3313,10 @@ class Pipeline:
         if enc.start():
             self.encoder = enc
             # 头一两帧带着进程冷启动（实测首帧 60-100ms，稳态 20ms 上下）：
-            # 不把它算进自适应判据，否则一上来就冤枉地降一档。
+            # 既不算进自适应判据，也把旧样本清掉 —— 否则"冷启动→误判跟不上→降档→
+            # 又重启编码器→又冷启动"会自己转成一个死循环（实测真的转过）。
             self._warm = 2
+            self.capture_ms = self.encode_ms = 0.0
         else:
             self._no_encoder = True
             self._drop_screen("没装 ffmpeg：抓帧退回 import（每帧一个进程，慢但能用）")
@@ -3299,17 +3404,26 @@ class Pipeline:
         return jpeg, enc.last_ms, f"{enc.out_w}x{enc.out_h}"
 
     # ---------------------------------------------------------------- 出帧
-    def _wake(self, timeout: float) -> None:
-        """睡到"有事发生"：damage 到达 / 改档 / 回收 / 超时。"""
-        if self._stop.is_set() or timeout <= 0:
-            return
+    def _wake(self, timeout: float) -> bool:
+        """睡到"有事发生"：damage 到达 / 改档 / 回收 / 超时。
+
+        返回"这次醒来是不是因为画面真的变了"（没有 XDamage 的轮询路线上恒为 False：
+        它靠定时抓帧发现变化，所以空转时也按 IDLE_FPS 的节拍抓）。
+        """
+        if timeout <= 0:
+            self._drain_notify()
+            return False
+        if self._stop.is_set():
+            return False
+        hit = False
         scr = self.screen
         if scr is not None:
-            scr.wait(timeout, extra=(self._rfd,))
+            hit = bool(scr.wait(timeout, extra=(self._rfd,)))
             self._count_damage(scr)
         else:
             self._stop.wait(timeout)
         self._drain_notify()
+        return hit
 
     def _count_damage(self, scr: X11Screen) -> None:
         total = scr.damage_events
@@ -3414,7 +3528,7 @@ class Pipeline:
         self.next_capture = self.last_capture_at + 1.0 / max(1, fps)
 
     # ---------------------------------------------------------------- 自适应
-    def achieved_fps(self, window: float = 2.0) -> float:
+    def achieved_fps(self, window: float = 3.0) -> float:
         """最近 ``window`` 秒里真正**出帧**的速率（数据不够时返回 0 = 还不知道）。
 
         为什么自适应判据要带上它：只看"一帧耗时"会被单帧抖动骗到
@@ -3432,13 +3546,15 @@ class Pipeline:
         """自适应降档（契约 §5.2）：**先 fps → 再 scale → 最后 quality**；闲了再逐档回升。
 
         判据是"一帧的实测耗时超出帧周期的预算" **且** "实际出帧数明显低于目标" ——
-        两者同时成立才算跟不上（只看耗时会被单帧抖动误伤）。
+        两者同时成立才算跟不上（只看耗时会被单帧抖动误伤）。而且必须**连续两次评估**
+        都成立才真降档：这台机器上别的活儿（编译器、别的会话、别的测试）会让某一帧忽然
+        慢两三倍，单帧抖动就降档的话画面会在 15fps↔9fps 之间来回跳，比降档本身更难看。
         降档只写进 ``self.auto``（只降不升），用户 POST 的目标档永远原样保留。
         """
         cost = self.capture_ms + self.encode_ms
         budget = max(8.0, 1000.0 * ADAPT_BUDGET_RATIO / max(1, cfg["fps"]))
         achieved = self.achieved_fps()
-        behind = achieved == 0.0 or achieved < 0.8 * cfg["fps"]
+        behind = achieved == 0.0 or achieved < 0.75 * cfg["fps"]
         now = time.monotonic()
         if self._warm > 0:                           # 编码进程刚起：这几帧不作数
             self._warm -= 1
@@ -3447,6 +3563,11 @@ class Pipeline:
         if now - self.last_adapt < ADAPT_COOLDOWN:
             return
         if cost > budget and behind:
+            self.over_strikes += 1
+            if self.over_strikes < ADAPT_STRIKES:    # 一次抖动不算数，等下一次评估
+                self.last_adapt = now
+                return
+            self.over_strikes = 0
             self.last_adapt = now
             shown = f"{cost:.0f}ms/帧（目标 {cfg['fps']}fps，实际 {achieved:.1f}fps）"
             if cfg["fps"] > MIN_FPS:
@@ -3465,20 +3586,42 @@ class Pipeline:
                 self.reason = f"已经是最低档还是跟不上：{shown}"
             print(f"[{self.sess.sid}] 自适应降档：{self.reason}", flush=True)
             self._notify()                           # 档变了下轮重启编码进程
-        elif cost < budget * 0.6 and (achieved == 0.0 or achieved >= 0.9 * cfg["fps"]):
+        elif cost < budget * ADAPT_HEADROOM and achieved > 0.0:
+            # 有余量就往上爬（有滞回：每 ADAPT_RECOVER_EVERY 秒动一小步）。
+            # 只降档不回升的话，一次瞬时卡顿会把这个会话**永久**按在低帧率上。
+            self.over_strikes = 0
             if not self.calm_since:
                 self.calm_since = now
-            elif now - self.calm_since >= ADAPT_RECOVER_HOLD:
+            elif now - self.calm_since >= ADAPT_RECOVER_EVERY:
                 self.calm_since = now
-                for key in ("quality", "scale", "fps"):     # 回升：先还 quality
-                    if self.auto[key] is not None:
-                        self.auto[key] = None
-                        self.reason = f"闲下来了（{cost:.0f}ms/帧）→ {key} 回升"
-                        print(f"[{self.sess.sid}] 自适应回升：{self.reason}", flush=True)
-                        self._notify()
-                        break
+                step = self._recover_step()
+                if step:
+                    self.reason = f"有余量（{cost:.0f}ms/帧 < {budget * ADAPT_HEADROOM:.0f}ms）→ {step}"
+                    print(f"[{self.sess.sid}] 自适应回升：{self.reason}", flush=True)
+                    self._notify()
         else:
             self.calm_since = 0.0
+
+    def _recover_step(self) -> str:
+        """回升一小步（返回说明；没有可回升的返回空串）。
+
+        顺序与降档相反（quality → scale → fps）：降档时 quality 是最后的保命手段，
+        回升时先把它还回去；fps 是**一步步 +2 爬**的，避免一恢复就又踩到过载线。
+        """
+        user = self.config
+        if self.auto["quality"] is not None:
+            value = min(user["quality"], self.auto["quality"] + 15)
+            self.auto["quality"] = None if value >= user["quality"] else value
+            return f"quality 回升到 {value}"
+        if self.auto["scale"] is not None:
+            value = min(user["scale"], round(self.auto["scale"] + 0.25, 2))
+            self.auto["scale"] = None if value >= user["scale"] else value
+            return f"scale 回升到 {value}"
+        if self.auto["fps"] is not None:
+            value = min(user["fps"], self.auto["fps"] + ADAPT_RECOVER_FPS)
+            self.auto["fps"] = None if value >= user["fps"] else value
+            return f"fps 回升到 {value}"
+        return ""
 
 
 def _grab_loop(sess: Session) -> None:
@@ -3640,10 +3783,12 @@ def stats_payload(sid: str, sess) -> dict:
             "quality": DEFAULT_QUALITY, "scale": DEFAULT_SCALE, "mode": "idle",
             "captureMs": 0.0, "encodeMs": 0.0, "cursor": None, "reason": "",
             "encoder": "none", "cursorOnly": 0, "clients": 0, "seq": 0, "crc": 0,
-            "damageEvents": 0, "lastFrameAgeMs": None, "targetFps": DEFAULT_FPS,
+            "damageEvents": 0, "damageAgoMs": None, "lastFrameAgeMs": None,
+            "targetFps": DEFAULT_FPS, "fpsCap": DEFAULT_FPS, "fpsActual": 0.0,
+            "userFps": DEFAULT_FPS, "idle": True,
             "idleFps": IDLE_FPS_SLOW, "costMs": 0.0,
-            "stream": {"fps": 0.0, "quality": DEFAULT_QUALITY, "scale": DEFAULT_SCALE,
-                       "mode": "idle"},
+            "stream": {"fps": 0.0, "fpsCap": DEFAULT_FPS, "quality": DEFAULT_QUALITY,
+                       "scale": DEFAULT_SCALE, "mode": "idle"},
         }
     sess.pipe.watch()                                # 采样即"有人在看"（别在观测时降频）
     out = sess.pipe.stats()
@@ -3966,6 +4111,10 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     timeout = 60
 
+    #: 当前请求的 body（懒读一次；读了多少也要记下来，见 _body_bytes / _drain_request_body）
+    _body = None
+    _body_read = 0
+
     # ------------------------------------------------------------ 基础设施
     def log_message(self, *args) -> None:            # 静音：日志留给真正的错误
         pass
@@ -3974,20 +4123,67 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[http] {self.address_string()} {fmt % args}", flush=True)
 
     def handle_one_request(self) -> None:
-        """把 handler 里的任何异常挡住 —— BaseHTTPRequestHandler 默认会**打整条栈**。"""
+        """把 handler 里的任何异常挡住 —— BaseHTTPRequestHandler 默认会**打整条栈**。
+
+        ⚠️ 收尾还要**抽干本次请求没读完的 body**：``protocol_version`` 是 HTTP/1.1
+        （keep-alive），而 Python 的 http.server **不会**替你读 body。实测后果：
+        同一条连接上先发 ``POST /s/<sid>/stream-config``（旧版服务 → 404，body 没人读），
+        紧接着的 ``GET /health`` 会拿到 **501**，而且 501 里的"方法名"就是上一个 POST 的
+        JSON body。``curl`` 不复用被污染的连接所以复现不出来，但 **Node/undici 与浏览器
+        fetch 会** —— 宿主"旧版服务上探 /stream"就会因此误判"上游没有流"，
+        客户端静默退回轮询，0.4.0 的流畅度整条路作废。
+        """
+        self._body = None
+        self._body_read = 0
         try:
             BaseHTTPRequestHandler.handle_one_request(self)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
         except Exception as exc:                     # noqa: BLE001
             self.close_connection = True
-            print(f"[http] 请求处理异常（已隔离，服务继续）：{type(exc).__name__}: {exc}",
-                  flush=True)
+            # 带上一行出错位置：这类异常以前只有一句消息，排查时得靠猜
+            # （实测就是靠这一行定位到"回收会话时 _server_proc 是字符串"的）。
+            where = traceback.extract_tb(sys.exc_info()[2])[-1]
+            print(f"[http] 请求处理异常（已隔离，服务继续）：{type(exc).__name__}: {exc}"
+                  f" @ {where.filename.split('/')[-1]}:{where.lineno} {where.name}", flush=True)
+        finally:
+            self._drain_request_body()
+
+    def _drain_request_body(self) -> None:
+        """把本请求剩下的 body 读掉（读不完就直接关连接，绝不污染下一条请求）。"""
+        try:
+            if self.close_connection:
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+        except (AttributeError, TypeError, ValueError):
+            return
+        left = max(0, length) - self._body_read
+        if left <= 0:
+            if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+                # 分块 body 找不到长度、也没法安全跳到结尾：关连接，别让残留字节变成下一条请求
+                self.close_connection = True
+            return
+        if left > BODY_DRAIN_MAX:                    # 恶意/异常巨大的 body：不为它陪跑
+            self.close_connection = True
+            return
+        try:
+            while left > 0:
+                chunk = self.rfile.read(min(left, 16384))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            self._body_read = max(0, length - left)
+        except (OSError, ValueError):
+            self.close_connection = True
 
     def _head(self, code: int, ctype: str, length=None, extra=()) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Access-Control-Allow-Origin", "*")
+        if self.close_connection:
+            # 明确告诉客户端"用完就关"：否则它会按 HTTP/1.1 的默认语义把这条连接放回池子，
+            # 下一次请求才发现服务端已经关了（undici 会报 socket hang up）。
+            self.send_header("Connection", "close")
         # ⚠️ 必须禁用缓存：页面里写着"本会话的显示号"，而显示号/服务状态会变。
         # 早先没设这些头，Chromium 缓存了旧页面 —— 用户刷新后仍看到旧显示号
         # （页头写着 :233、而实际已是 :265），旧显示又已被清理 → 满屏漆黑。
@@ -4059,12 +4255,38 @@ class Handler(BaseHTTPRequestHandler):
             return unquote(parts[1]), "/" + "/".join(parts[2:])
         return None, raw
 
-    def _read_json(self):
+    def _precheck_body(self) -> None:
+        """看到"大到我们不会读"的 body，先把连接标成"用完就关"。
+
+        这样响应头里会带上 ``Connection: close``，客户端不会把一条**即将被我们关掉**的
+        连接放回池子（否则它下一次请求会撞上 socket hang up）。
+        """
         try:
             length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            length = 0
-        raw = self.rfile.read(length) if length > 0 else b""
+        except (AttributeError, TypeError, ValueError):
+            return
+        if length > BODY_DRAIN_MAX:
+            self.close_connection = True
+
+    def _body_bytes(self) -> bytes:
+        """本请求的 body（只读一次，最多 ``BODY_READ_MAX`` 字节）。
+
+        ⚠️ 一定要走这里读，别自己 ``rfile.read``：读了多少要记在 ``_body_read`` 上，
+        收尾的 :meth:`_drain_request_body` 才知道还剩多少要抽干（keep-alive 下
+        残留字节会被当成下一条请求的起始行，实测会变成 501）。
+        """
+        if self._body is None:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            length = max(0, min(length, BODY_READ_MAX))
+            self._body = self.rfile.read(length) if length > 0 else b""
+            self._body_read = len(self._body)
+        return self._body
+
+    def _read_json(self):
+        raw = self._body_bytes()
         if not raw:
             return {}
         return json.loads(raw.decode("utf-8", "replace"))
@@ -4080,6 +4302,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ GET
     def do_GET(self) -> None:                        # noqa: N802 - BaseHTTPRequestHandler
+        self._precheck_body()
         if not self._auth():
             return
         sid, rest = self._split(self.path)
@@ -4229,6 +4452,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ POST / DELETE
     def do_POST(self) -> None:                       # noqa: N802
+        self._precheck_body()
         if not self._auth():
             return
         sid, rest = self._split(self.path)
@@ -4251,6 +4475,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(404, f"未知路径 /s/{sid}{rest}")
 
     def do_DELETE(self) -> None:                     # noqa: N802
+        self._precheck_body()
         if not self._auth():
             return
         sid, rest = self._split(self.path)
