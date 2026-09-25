@@ -275,7 +275,20 @@ X-DSH-Cursor: <x,y 归一化 0..1>\r\n
 
 ### 5.5 观测接口
 
-* `GET /s/<sid>/stats?k=` → `{"fps":…,"captured":…,"encoded":…,"skipped":…,"bytesPerSec":…,
-  "quality":…,"scale":…,"mode":"xgetimage+xdamage|xgetimage+poll|import","captureMs":…,"encodeMs":…,
-  "damageEvents":…,"lastFrameAgeMs":…,"cursor":{…}}`
+* `GET /s/<sid>/stats?k=`（字段名冻结，perf 脚本按它断言）：
+  ```json
+  {"fps":19.7,            // 实测出帧率
+   "fpsActual":19.7,      // 同上（兼容两种叫法）
+   "fpsCap":20,           // 自适应控制器当前允许的上限
+   "userFps":20,          // 客户端通过 stream-config 设的档
+   "idle":false,          // 距上一次画面变化 >2s 视为空闲（空闲窗口不参与降档评估）
+   "reason":"…",         // 人类可读：为什么降档/回升/空闲
+   "quality":70,"scale":1.0,
+   "mode":"xgetimage+XDamage","encoder":"ffmpeg",
+   "captureMs":4.1,"captureMaxMs":…,"encodeMs":18.0,"encodeMaxMs":…,"costMs":…,
+   "damageEvents":…,"damageAgoMs":…,"lastFrameAgeMs":…,
+   "captured":…,"encoded":…,"skipped":…,"cursorOnly":…,
+   "bytesPerSec":…,"clients":…,"seq":…,"crc":…,"cursor":{"x":…,"y":…},
+   "stream":{"fps":…,"fpsCap":…,"quality":…,"scale":…,"mode":…}}
+  ```
 * 宿主 `GET /api/dsh-display-panel/stats?session=` 透传（供面板显示与 perf 脚本断言）。
