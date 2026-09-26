@@ -118,15 +118,42 @@
 
 ### 1) 装插件本体（官方路径，实测可用）
 
+**从 npm 装（推荐，一条命令，自动拿最新版）：**
+
 ```sh
-# <profile> 是你跑 DSH 用的 profile 名（例如 web / desktop / test）
-dsh plugin --profile <profile> add link:/绝对路径/dsh-display-panel
-# 或已发布到 npm 的版本 / 本地打包：
-dsh plugin --profile <profile> add dsh-display-panel
-dsh plugin --profile <profile> add file:/绝对路径/dsh-display-panel-0.3.0.tgz
+bash scripts/install-plugin.sh                       # 默认 profile = web
+bash scripts/install-plugin.sh <profile>             # 例如 tui / desktop / test
+bash scripts/install-plugin.sh --print <profile>     # 只看它会执行什么，不动手
 ```
 
-这条命令会做两件事（实测，隔离 DSH_HOME 里跑过）：
+> ⚠️ **不要直接 `dsh plugin add dsh-display-panel`**（不带版本号）：pnpm 11 默认开着
+> **24 小时发布冷静期**（`minimumReleaseAge=1440`），不带版本号（甚至 `@latest`）都会
+> 解析到**上一个**版本。实测（pnpm 11.7.0，隔离 profile）：
+>
+> | 命令 | 实际装到 |
+> |---|---|
+> | `add dsh-display-panel` | `^0.6.1` ← 不是最新版 |
+> | `add dsh-display-panel@latest` | `^0.6.1` ← `latest` 这个 tag 也绕不过冷静期 |
+> | `add dsh-display-panel@0.7.0` | `0.7.0`，**且 pnpm 自动把这一版写进 `minimumReleaseAgeExclude`** |
+>
+> 所以"带版本号"是唯一能拿到最新版的形式，而版本号写死在文档里会随时间失效 ——
+> `scripts/install-plugin.sh` 就是替你把这件事做掉：查最新版 → 必要时加白名单 →
+> 带版本号安装。它**幂等**，重复跑没有副作用。
+>
+> 它只会动**一个文件**（`<profile>/pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`
+> 那一项，改动前自动备份），用的是 YAML 解析定位 + 最小文本插入，**不动你的注释和
+> 缩进**；认不出来的写法宁可拒绝并给出人工指令，也不会猜着写。`--print` 可以只看
+> 它打算做什么。
+
+**从本地目录装（开发用，软链，改代码不用重装）：**
+
+```sh
+dsh plugin --profile <profile> add link:/绝对路径/dsh-display-panel
+# 或本地打包文件：
+dsh plugin --profile <profile> add file:/绝对路径/dsh-display-panel-0.7.0.tgz
+```
+
+上面这些命令都会做两件事（实测，隔离 DSH_HOME 里跑过）：
 
 * 在 `$DSH_HOME/profiles/<profile>/` 里装依赖（`link:` 就是软链，改代码不用重装）；
 * **自动把包名写进 `dsh.profile.bundles`**，不需要再手工编辑 `package.json`。
@@ -216,6 +243,21 @@ bash scripts/uninstall-service.sh --purge                 # 连 <home> 一起删
 状态条会显示：后端（x11/wayland/win32/darwin）、分辨率、是否可注入、
 Windows/macOS 上还会明确写「**真实桌面**」（那上面动的是你的真键鼠）。
 
+#### 真实桌面上的「打开注入」要过一次确认（0.8.0 起）
+
+Linux 上每个会话是一台**独立虚拟显示**，注入本来就开着，什么都不会弹。
+Windows / macOS 上抓到的是**本机真实桌面**（所有会话共用那一块屏），
+注入默认关闭；这时状态条会出现「**打开注入**」按钮，点它**不会**直接生效，
+而是先弹一次确认：
+
+* 面板里的点击、拖动、滚轮会真的作用在**你自己的鼠标**上；
+* 面板里敲的键会送到**当前聚焦的那个窗口**（可能正在输密码）；
+* 所有会话共用这块屏，别的会话也可能看到、也可能点到。
+
+确认之后值才会写进配置并重启服务生效；不想开就点取消，只读观看不受影响。
+只读期间点画面**不会**静默丢弃事件，而是弹同一个确认框 —— 不会出现
+"点半天没反应、状态条还冒出'输入发送失败'"那种看起来像坏了的表现。
+
 ### 让程序跑在那台显示上
 
 **推荐**：让 AI 自己跑 —— 它有这么几个工具（名字都带 `display_panel_` 前缀）：
@@ -271,24 +313,51 @@ curl -s -X POST 'http://127.0.0.1:<DSH端口>/api/dsh-display-panel/exec?session
 两者不是"新旧替代"关系，而是"能用"与"更稳、更可诊断"的差别。文档以前只写了前一种，
 现在两种都写清楚。
 
+### 设置卡片（0.8.0 起，无需环境变量）
+
+DSH 的**设置 → 插件**里有一张「显示器面板」卡片，三项可直接改：
+
+| 卡片字段 | 等价环境变量 | 说明 |
+|---|---|---|
+| 分辨率 | `DSH_VIEW_SIZE` | 每会话显示尺寸，如 `1600x1000`；对**新会话**生效 |
+| 空闲回收（分钟） | `DSH_VIEW_IDLE_MINUTES` | `0` = 不回收；默认 30 |
+| 允许注入真实键鼠 | `DSH_VIEW_INPUT` | 仅 win32/darwin 有意义（Linux 上本来就是开的） |
+
+优先级：**卡片值 > 环境变量 > 内置默认值**。卡片里留空的字段会用环境变量
+（没有就用默认值），所以"脚本里 export 的 `DSH_VIEW_*`"不会被卡片吃掉 ——
+两者可以共存。保存后宿主会**自动重启显示器服务**让新值生效。
+
+> **老版本 DSH 怎么办**：这三项在 DSH `0.1.5` / `0.1.6` 上同样有卡片
+> （走那一代的 `settings.register` + `settingsScope` 设置面），
+> 在 `0.1.6-alpha.2` 之后卡片注册到新的 `plugins.bundle.config` 槽位。
+> 三代的具体差别、以及"宿主的 `settings` 服务名不变但语义换掉了"这个坑，
+> 见 [docs/CONTRACT.md](docs/CONTRACT.md) 的设置章节。
+> 拿不到设置面时（极老的宿主）面板不会假装成功：卡片会直接说明
+> "请用环境变量配置"。
+
 ### 环境变量
 
 | 变量 | 默认 | 谁读 | 作用 |
 |---|---|---|---|
 | `DSH_DISPLAY_HOME` | `~/.cache/dsh-display` | 服务 / 宿主 / 脚本 | 令牌、端口、PID、日志、会话映射都在这 |
 | `DSH_VIEW_PORT` | `8099` | 服务 / 宿主 / 脚本 | 起始端口（被占自动顺延，最多 12 个） |
-| `DSH_VIEW_SIZE` | `1600x1000` | 服务 | 每会话显示的分辨率 |
+| `DSH_VIEW_SIZE` | `1600x1000` | 服务 | 每会话显示的分辨率（**设置卡片可覆盖**） |
 | `DSH_VIEW_BACKEND` | 按平台自动 | 服务 | 强制 `x11` / `wayland` / `win32` / `darwin` |
-| `DSH_VIEW_INPUT` | 关 | 服务 | win32/darwin 上开启注入（动的是**真实键鼠**） |
-| `DSH_VIEW_IDLE_MINUTES` | `30` | 服务 | 空闲多久回收会话与 Xvfb；`0` = 不回收 |
+| `DSH_VIEW_INPUT` | 关 | 服务 | win32/darwin 上开启注入（动的是**真实键鼠**；**设置卡片可覆盖**） |
+| `DSH_VIEW_IDLE_MINUTES` | `30` | 服务 | 空闲多久回收会话与 Xvfb；`0` = 不回收（**设置卡片可覆盖**） |
+| `DSH_VIEW_TRUSTED_HOSTS` | 空 | 服务 | **额外**放行的 Host（逗号分隔，如 `myhost.lan` 或 `myhost.lan:8099`）。正常用不到：服务只监听回环、面板走宿主同源代理 |
 | `DSH_VIEW_LOG` | `<home>/viewer.log` | 服务 / 宿主 | 日志文件 |
 | `DSH_VIEW_MANAGED` | 开 | **宿主** | 设 `0` 关掉"自动拉起服务" |
 | `DSH_VIEW_PYTHON` | 自动找 `python3`→`python` | **宿主** | 宿主拉起服务用的解释器（找不到会在 `/info` 的 `missing[]` 里明说） |
+| `DSH_INSTALL_ANCHOR` | 自动推导 | **宿主** | 只在**自动推导失败**时才需要：指向 DSH 安装目录里的 `package.json`（用于解析 `@deepseek-ai/schemastery`，见「实现要点」） |
 | `DSH_VIEW_SYSTEMD` | `auto` | **脚本** | `1` 强制用 systemd 单元、`0` 强制用后台兜底 |
 | `DSH_VIEW_UNIT_NAME` | `dsh-display-panel-viewer` | 脚本 | 单元名（同机多实例时改它） |
 | `DSH_VIEW_UNIT_DIR` | `~/.config/systemd/user` | 脚本 | 单元目录（测试时可指到临时目录） |
 | `DSH_VIEW_FORCE` | 关 | 脚本 | `1` = 允许覆盖"不是本包装的"同名单元（等价 `--force`） |
 | `PYTHON` | 自动 | 脚本 | 脚本与服务用的解释器 |
+| `PLUGIN_REGISTRY` | 跟随 profile / 用户 `.npmrc` | `install-plugin.sh` | 查"最新版"用的 registry |
+| `PLUGIN_VERSION` | 自动查 | `install-plugin.sh` | 指定要装的版本（跳过查询） |
+| `NPM_BIN` / `DSH_BIN` / `DSH_PROFILE` | 自动 / `web` | `install-plugin.sh` | 覆盖工具路径与默认 profile |
 
 ## 团队看板（0.7.0）
 
@@ -372,6 +441,7 @@ python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --
 | POST | `/exec?session=<sid>` | 在会话显示上跑程序 |
 | GET | `/procs?session=<sid>` · POST `/kill?session=<sid>` | 列出 / 结束由面板拉起的进程 |
 | POST | `/service` | `{"action":"start"\|"stop"\|"restart"\|"status"}` |
+| POST | `/config` | 写设置（`{"size"?,"idleMinutes"?,"inputEnabled"?,"restart"?}`）。面板上的「打开注入」确认之后走这条；宿主版本不支持时回 **501** 而不是假装成功 |
 | GET | `/events?session=<sid>` | 可选：SSE 状态推送（没有就由客户端轮询） |
 
 ### 显示器服务（`http://127.0.0.1:<port>`，仅本机）
@@ -379,9 +449,27 @@ python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --
 这些口**面板不走**（面板走上面的同源代理）。给脚本/AI 直接用时必须带 `?k=<token>`
 （令牌是给"同机其它用户"设的闸：服务监听 127.0.0.1，别的用户也能连上）。
 
+**两道防线，缺一不可**（0.8.0 起）：
+
+1. **Host / Origin 白名单**：只接受 `127.0.0.0/8`、`localhost`、`[::1]` 的 Host；
+   带了 `Origin` 就必须与 Host 同源；`Sec-Fetch-Site: cross-site` 直接拒。
+   判定与 DSH 自己的 `isTrustedApiRequest` 同一套语义（含 `0x7f.0.0.1`、`2130706433`、
+   `127.1` 这类 WHATWG 等价写法 —— 两端用同一套 IPv4 规范化规则，才不会出现
+   "浏览器认为同源、服务端认为是外域"这类静默不一致）。
+   要额外放行别的名字用 `DSH_VIEW_TRUSTED_HOSTS`。
+2. **令牌**（`?k=` 或 Cookie，`hmac.compare_digest` 比较）。
+
+为什么光有令牌不够：浏览器里**任意网页**都能朝本机回环发请求，而 `fetch` 用
+`Content-Type: text/plain` 发的是"简单请求"**不触发预检** —— `POST /input`
+能被跨源页面直接打进来（读不到响应，但事件已经注进去了）；DNS rebinding
+更狠：攻击者把自己的域名解析到 `127.0.0.1`，此时请求在浏览器看来是同源的。
+`Access-Control-Allow-Origin: *` 在 0.8.0 里被**删掉**了（同源代理从来不需要它），
+`OPTIONS` 预检也改成明确拒绝。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/health?k=` | 探测专用：版本、后端、端口、PID、会话数、缺依赖。**无副作用** |
+| HEAD | `/` | 只回"服务活着"（无副作用，探活用） |
 | GET | `/?k=` | 会话索引页（HTML，人用兜底） |
 | GET | `/s/<sid>/` | 该会话的独立页面（面板不用它） |
 | GET | `/s/<sid>/snapshot?k=&t=` | 单帧 JPEG；没有帧就 503（不阻塞） |
@@ -393,6 +481,7 @@ python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --
 | GET | `/s/<sid>/procs?k=` · POST `/s/<sid>/kill?k=` | 列进程 / 结束进程 |
 
 会话号（`sid`）只允许 `^[A-Za-z0-9._-]{1,64}$`，别的返回 400。
+来源不可信的请求回 **403**（正文里写明原因，`viewer.log` 里同时落一行）。
 
 ## 故障排查
 
@@ -425,6 +514,24 @@ python3 service/selfcheck.py     # 服务内部不变式（后端解析、键名
                                  # 缺 Xvfb/xdotool/xclip/imagemagick 时相关项 SKIP 而不是 FAIL —— CI 无 GUI 也能跑
 python3 tools/selftest.py        # 端到端自测：临时 HOME + 临时 DSH_DISPLAY_HOME + 自动端口，
                                  # 自己起服务、自己收尸；覆盖 /health 无副作用、sid 校验、注入顺序、会话隔离…
+```
+
+下面几个是**针对 0.8.0 新增功能**的独立验证脚本（都在 `.verify/`，都是**只读或隔离**的：
+临时目录 + 随机端口，不碰你的 `~/.cache/dsh-display`，也不动你的 DSH 配置）：
+
+```sh
+python3 .verify/e2e-host-fence.py        # Host/Origin 白名单与 CORS：起真服务，发真请求
+                                         # （外域 Host、DNS rebinding 形态、跨源 Origin、预检…）
+python3 .verify/e2e-settings-env.py      # 设置卡片 → 服务进程环境变量：真拉起服务，
+                                         # 读 /proc/<pid>/environ 核对三项配置真的传下去了
+node .verify/client-render-probe.mjs     # 客户端半边离线渲染：用真 React 把设置卡片渲染成 HTML，
+                                         # 校验三个版本分支各自的槽位、字段与初始值
+python3 .verify/input-policy.py           # 注入关闭时 /input 必须回 403 且不入队
+                                         # （Linux 上跑不到这个分支，所以用替身把它钉住）
+bash .verify/install-plugin-yaml.sh      # 安装脚本改 pnpm-workspace.yaml 时只动该动的那一行
+                                         # （12 种 YAML 形态；在隔离的临时 DSH_HOME 里跑，不碰你的配置）
+python3 .verify/e2e-host-fence-adversarial.py   # 对抗性用例：畸形 Origin/Host 头、裸字节、
+                                         # 各方法出口、DSH_VIEW_TRUSTED_HOSTS 语义（76 项）
 ```
 
 `tools/selftest.py` 的输出长这样（数字随版本/环境不同；**跳过不算失败**）：
@@ -503,6 +610,87 @@ curl -s -X POST "http://127.0.0.1:<服务端口>/s/<sid>/exec?k=<token>" -H 'con
 * **服务退出要自己收拾 Xvfb**：否则 systemd 日志里会出现
   `Unit process … remains running after unit stopped`。
 * **令牌只在宿主侧**：面板拿不到令牌，也就没法把它写进 URL / 历史 / Referer。
+
+### 0.8.0 这一轮踩到的坑（都留了钉子）
+
+* **pnpm 的 24 小时发布冷静期**：`minimumReleaseAge` 默认 **1440**，于是
+  `add <包名>`（甚至 `add <包名>@latest`）都装到**上一个**版本，而报错/输出里
+  一个字都不提"冷静期"。唯一的拿法是**带确切版本号**（pnpm 还会自动把那一版写进
+  `minimumReleaseAgeExclude`）。`scripts/install-plugin.sh` 就是替用户做这件事的。
+  判定时还有个小坑：`pnpm config get minimumReleaseAge` 在**没配过**时回
+  `undefined`，而默认值其实是 1440 —— 把它当"没开"就白忙一场。
+* **"行 id"和"包名"是两个域，混用会静默失效**：`dsh-settings` 的
+  `describe()`/`update()` 与客户端的 `configForms.get()` 只认 **profile entry id**
+  （= `cordis.patch.yml` 里 `- id:` 的值，本插件是 `display-panel`），而卡片槽位
+  `plugins.bundle.config` 的 key 是**包名**（`dsh-display-panel`）。
+  混用两个字符串**不会报错** —— 表现是"卡片在、里面是空的、点保存还提示已保存"
+  （`get()` 找不到 entry 就返回一个 `status:'unavailable'` 的空表单，`set()` 返回
+  `false`）。所以：取设置面用行 id，注册槽位用包名，两边各一个常量，自检里钉住
+  "它们必须与 `cordis.patch.yml` 的 `id`/`name` 一致"。
+* **schema 上的 `.default()` 会吃掉环境变量兜底**：`resolveConfig` 会把默认值填进
+  `fiber.config`，于是 `configField()` **永远**拿不到 `undefined` ——
+  `resolveDisplayConfig()` 里"没设置就回落 `DSH_VIEW_*`"那段成了死代码，
+  `DSH_VIEW_IDLE_MINUTES` / `DSH_VIEW_INPUT` 这类既有用法会**静默失效**
+  （用户明明设了，面板却按默认值跑）。所以三个字段一律 `required(false)`，
+  默认值只在运行时兜底。自检里钉住：`validate(undefined)` 必须一个值都不给。
+* **`set()` 的返回值不能不看**：0.1.7 的 `ConfigForm.set/unset` 返回
+  `Promise<boolean>`，`false` = 宿主拒绝（超范围、revision 冲突、字段非 volatile）。
+  不看返回值就会出现"改失败也提示已保存"。同理 `/config` 路由不能吞掉写失败的
+  rejection 再回 200 —— 那等于**假装成功**，而用户会照着"已保存"去等一个不会发生的效果。
+* **改用户配置文件的脚本要"只动该动的那一行"**：`install-plugin.sh` 要把
+  `pkg@version` 写进 `pnpm-workspace.yaml` 的 `minimumReleaseAgeExclude`。
+  这一步被**对抗性审查打回来两轮**，值得记下来：
+  * 第一版一律**追加到文件末尾** —— 该键在文件中段、后面还有别的顶层键时，
+    追加的 `  - pkg@ver` 落到**最后一个顶层键**下面：
+    `autoInstallPeers: 'false - dsh-display-panel@0.7.0'`（写坏别人的配置），
+    而白名单**一条都没加**（冷静期照旧拦着）。
+  * 第二版改用 awk 做文本定位 —— 又漏了三种**完全合法**的 YAML 写法：行内注释
+    （`minimumReleaseAgeExclude:   # 白名单`）、flow 序列（`[…]: [a@1]`）、零缩进
+    列表项（pnpm 自己就写 `- a@1`）。漏的后果是写出**重复键**或混缩进，让整个
+    profile 的 pnpm 从此读不了这个文件（每次 `dsh plugin add` 都报
+    `duplicated mapping key`），而且 `pnpm` 不在 PATH 里时连事后校验都跑不到。
+  * 现在：`scripts/add-release-age-exclude.py` 用 YAML **解析定位 + 最小文本插入**
+    （不动用户的注释与缩进），写完**读回断言**新条目真的在列表里、别的键一个不少；
+    认不出来的形态就**拒绝写**并给出人工指令。回归用例钉了 12 种形态。
+* **`set -e` + `VAR="$(cmd)"` 会在 cmd 返回非零时直接退出脚本**（bash 5.3 实测）：
+  那条"文件形态不认识 → 拒绝写 + 给人工指令"的路径因此变成**静默退出**（用户既看不到
+  原因也拿不到指令）。改成 `VAR="$(cmd || true)"` 再单独取退出码。
+* **版本号进命令行之前必须过滤字符集**：`grep -q '^…$'` 是**按行**匹配的，
+  `PLUGIN_VERSION=$'1.0.0\nminimumReleaseAge: 0'` 的第一行完全匹配就被放行了
+  （多出来的那行跟着进了 pnpm 命令行）。现在先过字符集白名单 + 单行检查，再整串锚定。
+* **`dsh plugin add` 是转发给 pnpm 的，pnpm 必须在子进程 PATH 里**：宿主进程的
+  PATH 常常只有 `/usr/local/bin:/usr/bin`（pnpm 在 `~/.npm-global/bin`），于是
+  `pnpm was not found`（127）—— 而那时配置已经改过了。现在脚本把 pnpm 所在目录
+  前置进 PATH 再交下去。
+* **`@deepseek-ai/schemastery` 在插件目录里解析不到**：它是 DSH 包的依赖，不在
+  profile 的 `node_modules` 链上（`import` / `require.resolve` 双双
+  `MODULE_NOT_FOUND`，实测）。但设置卡片的字段**必须**是真正的 schemastery 对象
+  （`dsh-settings` 的 `volatileForm()` 要读 `schema.dict` / `meta.volatile` /
+  `toJSON()`，手搓一个长得像的没用）。所以改成从**宿主进程的入口脚本**逐级向上找
+  `node_modules`，并且**先 `realpathSync`** —— `~/.npm-global/bin/dsh` 是软链，
+  不解析就永远差一层目录。找不到时 `Config = undefined`，插件照常工作、只是没表单。
+* **`settings` 服务名三代都在、语义却变了**：0.1.7 把 `register` 换成了行 `Config`，
+  但服务名还是 `settings`。`ctx.inject(['settings'], cb)` 在 0.1.7 上**照样会触发**，
+  进到回调里才发现没有 `register` —— 所以必须**方法级探测**，不能靠服务名判版本。
+* **`.volatile()` 不是一开始就有的**：0.1.5/0.1.6 的 schemastery 里**没有**这个方法，
+  而 `Config` 是模块加载期构造的 —— 直接调用会让整行加载失败（0.1.5 的 loader 还会
+  连带回滚整个 group）。所以探测着调（`live()`）。
+* **客户端静态 `inject` 里不能写版本相关的服务名**：写了之后服务缺席时整份 apply
+  会**静默 PENDING**（面板跟着一起消失）。正确姿势是 `ctx.inject(['configForms'], cb)`
+  这种回调式分叉 —— 服务不在时回调永不执行，也不抛错。
+* **WHATWG 的 IPv4 写法必须自己归一化**：Python 的 `ipaddress` 不认 `0x7f.0.0.1`、
+  `2130706433`、`127.1`（浏览器和 `new URL()` 全都认，且会规范化成 `127.0.0.1`）。
+  两端规则不一致就会出现"浏览器认为同源、服务端认为是外域"这类**静默不一致** ——
+  安全判定上这就是隐患，所以照着 URL 标准写了一遍（含 `ends in a number`：
+  `1.2.3.4.5` 这种**不得**当域名放行）。
+* **浏览器里任意网页都能打本机回环**：`fetch` 用 `Content-Type: text/plain` 发的是
+  "简单请求"**不触发预检**，于是 `POST /input` 能被跨源页面直接打进来（读不到响应，
+  但事件已经注进去了）；DNS rebinding 更狠 —— 攻击者域名解析到 `127.0.0.1`，
+  请求在浏览器看来就是同源。令牌挡不住这两种，所以加了 Host/Origin 白名单，
+  并且把 `Access-Control-Allow-Origin: *` **删掉**。
+* **只读时"点不动"要解释，不能静默失败**：真实桌面 + 注入关闭时，事件本来会照发、
+  服务端照拒，5 次之后状态条冒出"输入发送失败" —— 用户看到的是"坏了"，
+  其实是"没开"。现在客户端在入队前就拦住，改成弹"要不要打开注入"的确认框。
 
 ## 打包与发布
 

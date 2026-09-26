@@ -121,6 +121,7 @@ from __future__ import annotations
 
 import ctypes
 import hmac
+import ipaddress
 import html as _html
 import json
 import os
@@ -372,6 +373,263 @@ def token_ok(path: str, headers=None) -> bool:
     if not supplied:
         return False
     return hmac.compare_digest(supplied, TOKEN)
+
+
+# ---------------------------------------------------------------- Host 白名单
+# 令牌是"能不能读"的防线，Host 是"谁能来问"的防线，两道都要有。
+#
+# 为什么令牌之外还要这一道：服务监听 ``127.0.0.1``，**浏览器里的任意网页都能
+# 朝本机回环发请求**（``<img>``/``fetch``/表单提交），而 ``fetch`` 能发
+# ``Content-Type: text/plain`` 的"简单请求"——**不触发预检**，于是
+# ``POST /s/<sid>/input`` 这种写操作能被跨源页面直接打进来（读不到响应，
+# 但事件已经注进显示里了）。更糟的是 DNS rebinding：攻击者把自己的域名解析到
+# ``127.0.0.1``，此时请求在**浏览器看来是同源**的，``Host`` 头却是攻击者的域名
+# ——不带 ``k=`` 的请求只要命中"没令牌就不设防"的旧行为就能被读走。
+#
+# 所以照抄 DSH 自己的 ``isTrustedApiRequest``（``@deepseek-ai/dsh-client-connection``）
+# 的语义，只多一条"可选扩展"：本服务**永远只监听回环**，正常访问路径是宿主半边
+# 的同源代理 —— 代理打上游时 Host 是 ``127.0.0.1:<port>``，天然在白名单里。
+TRUSTED_HOSTS: tuple[str, ...] = tuple(
+    item.strip().lower()
+    for item in os.environ.get("DSH_VIEW_TRUSTED_HOSTS", "").split(",")
+    if item.strip()
+)
+
+
+def is_loopback_hostname(hostname: str) -> bool:
+    """主机名是否就是本机回环（与 DSH 的 ``isLoopbackHostname`` 同一套判定）。
+
+    ``localhost`` / IPv6 回环 ``[::1]`` / 任意 ``127.0.0.0/8`` 地址。
+    **不做 DNS 解析**：解析一次就等于给攻击者一个可控的 TTL 窗口
+    （rebinding 正是靠这个），纯字符串判定没有窗口。
+    """
+    name = (hostname or "").lower()
+    if name in ("localhost", "[::1]", "::1"):
+        return True
+    parts = name.split(".")
+    if len(parts) != 4 or parts[0] != "127":
+        return False
+    return all(part.isdigit() and len(part) <= 3 and int(part) <= 255 for part in parts)
+
+
+def parse_ipv4_literal(host: str):
+    """按 WHATWG URL 的 IPv4 解析器把主机名折成点分十进制；不是 IPv4 写法就回 None。
+
+    为什么非做不可：浏览器与 Node 的 ``new URL()`` 会把 ``0x7f.0.0.1``、
+    ``0177.0.0.1``、``2130706433`` 这类写法**全都规范化成** ``127.0.0.1``
+    （URL 标准里主机名的 IPv4 解析是"每段按 0x/0/十进制解析、末段按位数补足"）。
+    服务端如果只用 ``ipaddress`` 判定，这些形式就会**判不出来是回环**：
+
+    * 拒绝它们 → 正常浏览器根本不会发这种 Host，行为上没差；
+    * 但如果哪天有路径把"服务端认定"与"浏览器认定"当成同一个判断
+      （例如将来放行别的来源），两边不一致就是一个**静默放宽**的口子。
+
+    所以两端用同一套规则，代价是这二十行。规则与 URL 标准一致：
+    每段按前缀决定进制（``0x``/``0X`` = 十六进制，前导 ``0`` = 八进制，否则十进制），
+    末段独占剩余字节数（所以 ``127.1`` = ``127.0.0.1``），任何越界即整段作废。
+    """
+    text = (host or "").strip()
+    if not text:
+        return None
+    if text.endswith("."):
+        text = text[:-1]
+    parts = text.split(".")
+    if parts and parts[-1] == "":                      # 尾随点只允许一个
+        parts.pop()
+    if not parts or len(parts) > 4:
+        return None
+    numbers: list[int] = []
+    for index, part in enumerate(parts):
+        if not part:
+            return None
+        base = 10
+        digits = part
+        if len(part) >= 2 and part[:2].lower() == "0x":
+            base, digits = 16, part[2:]
+            if not digits:
+                return None
+        elif len(part) >= 2 and part[0] == "0":
+            base, digits = 8, part[1:]
+            if not digits:
+                numbers.append(0)
+                continue
+        allowed = "0123456789abcdef" if base == 16 else ("01234567" if base == 8 else "0123456789")
+        if any(ch.lower() not in allowed for ch in digits):
+            return None
+        numbers.append(int(digits, base))
+    if any(value > 255 for value in numbers[:-1]):
+        return None
+    if numbers[-1] >= 256 ** (5 - len(numbers)):
+        return None
+    total = numbers[-1]
+    for index, value in enumerate(numbers[:-1]):
+        total += value * 256 ** (3 - index)
+    return f"{(total >> 24) & 255}.{(total >> 16) & 255}.{(total >> 8) & 255}.{total & 255}"
+
+
+def ends_in_a_number(host: str) -> bool:
+    """主机名是否以"数字段"结尾（URL 标准里 `ends in a number` 的判定）。
+
+    这条规则决定了「本该是 IPv4 却写坏了」的字符串怎么处理：
+    ``1.2.3.4.5``（五段）、``0x7f.0.0.256``（越界）、``999999999999``（太大）
+    都以数字结尾但**不是**合法 IPv4 —— 浏览器解析这种主机名会**直接报错**，
+    不会把它当域名。服务端必须做出同样的判断，否则
+    "``1.2.3.4.5`` 是个普通域名"就成了一个只在服务端成立的假设。
+    """
+    parts = (host or "").split(".")
+    if parts and parts[-1] == "":
+        parts.pop()
+    if not parts or not parts[-1]:
+        return False
+    last = parts[-1]
+    if all(ch.isdigit() for ch in last):
+        return True
+    if len(last) >= 2 and last[:2].lower() == "0x":
+        return all(ch.lower() in "0123456789abcdef" for ch in last[2:])
+    return False
+
+
+def canonical_authority(authority: str):
+    """把 ``host[:port]`` 规范化成 ``(host, port)``；不是裸 authority 就回 None。
+
+    与 DSH 的 ``parseAuthority`` + ``canonicalAuthority`` 对齐：
+
+    * 整体形态必须是裸 authority（不允许 ``http://h``、``user@h``、``h/path``、
+      ``h?x``、``h#x``）—— 带这些形状的一律判**不**可信，宁可拒绝也别猜；
+    * 端口必须是纯数字（零填充的 ``:08099`` 会被浏览器规范化成 ``:8099``，
+      两边对不上就会静默放宽，所以直接拒绝这种写法）；
+    * 主机名先过 :func:`parse_ipv4_literal`（``0x7f.0.0.1`` / ``2130706433`` /
+      ``127.1`` 这类 WHATWG 写法全落到 ``127.0.0.1``），再退到 IPv6，
+      最后才当域名（域名只接受小写 ASCII，**不做 punycode 之外的任何猜测**）。
+    """
+    # ⚠️ 只剥 ASCII 空白（HTTP 的 OWS），**不用 `str.strip()`**：后者会连
+    # Unicode 空白（`\x0b`、`\xa0`、`\u2028`…）一起吃掉，于是
+    # `Host: 127.0.0.1:8099\x0b` 这种畸形头会被"洗干净"后放行。
+    # 剥完还残留任何空白（`.isspace()` 认 Unicode）就直接判不可信。
+    raw = (authority or "").strip(" \t")
+    if not raw or any(ch in raw for ch in "/?#@") or any(ch.isspace() for ch in raw):
+        return None
+    if raw.startswith("["):                            # [::1]:8099 / [::1]
+        close = raw.find("]")
+        if close < 0:
+            return None
+        host, rest = raw[:close + 1], raw[close + 1:]
+        if rest and not rest.startswith(":"):
+            return None
+        port = rest[1:] if rest else ""
+        literal = host[1:-1]
+    elif raw.count(":") > 1:                           # 裸 IPv6（无端口）
+        host, port, literal = raw, "", raw
+    else:
+        host, _, port = raw.partition(":")
+        literal = host
+    if port and (not port.isdigit() or (len(port) > 1 and port.startswith("0"))):
+        return None
+    canonical = parse_ipv4_literal(literal)
+    if canonical is None:
+        try:
+            canonical = str(ipaddress.ip_address(literal))
+            if ":" in canonical:
+                canonical = f"[{canonical}]"
+        except ValueError:
+            canonical = host.lower()
+            # 以数字结尾却不是合法 IPv4：浏览器解析这个主机名会失败，
+            # 我们也不能退而把它当域名（见 :func:`ends_in_a_number`）。
+            if ends_in_a_number(canonical):
+                return None
+            if not re.fullmatch(
+                    r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*",
+                    canonical):
+                return None
+    return canonical, port
+
+
+def trusted_authority(authority: str) -> bool:
+    """authority 是否在"本机 / 显式白名单"里。
+
+    端口语义照抄 DSH：条目**带端口**就要求完全一致（``127.0.0.1:8099`` 只信这一个
+    端口），**不带端口**则匹配该主机的任意端口（IP 字面量的端口可能是系统分配的）。
+    """
+    parsed = canonical_authority(authority)
+    if parsed is None:
+        return False
+    host, port = parsed
+    if is_loopback_hostname(host):
+        return True
+    for entry in TRUSTED_HOSTS:
+        entry_parsed = canonical_authority(entry)
+        if entry_parsed is None:                      # 配置写错的名字：忽略而不是放宽
+            continue
+        entry_host, entry_port = entry_parsed
+        if entry_host == host and (not entry_port or entry_port == port):
+            return True
+    return False
+
+
+def origin_reason(origin: str, raw_host: str) -> str:
+    """``Origin`` 头是否与 ``Host`` 同源；同源回 ``""``，否则回原因。
+
+    **刻意不用 ``urlparse``**（真踩过）：``urlparse("http://[")`` 会抛
+    ``ValueError: Invalid IPv6 URL``。那个异常发生在令牌校验**之前**，结果是
+    "攻击者用一个畸形头就能让服务对本请求一个字节都不回"（栈打到日志里），
+    比直接拒绝还糟 —— 拒绝至少是个明确的答复。所以这里全部用字符串判定，
+    任何输入都只可能得到"通过"或"一条原因"，不会抛。
+
+    只接受**合法序列化**的 origin（``scheme://host[:port]``）：`Origin` 是浏览器
+    生成的，非该形状的一律不可信（``http:host:port`` 这种缺 ``//`` 的、
+    带 path/userinfo 的都不是序列化产物）。
+    """
+    raw = (origin or "").strip(" \t")
+    scheme, sep, rest = raw.partition("://")
+    if not sep or scheme.lower() not in ("http", "https"):
+        return f"Origin {origin!r} 不是 http(s) 来源（要求 scheme://host[:port]）"
+    if not rest or any(ch in rest for ch in "/?#@"):
+        return f"Origin {origin!r} 带了路径/查询/userinfo —— 不是合法的序列化 Origin"
+    parsed = canonical_authority(rest)
+    if parsed is None:
+        return f"Origin {origin!r} 的 host 部分无法解析"
+    origin_host, origin_port = parsed
+    host_parsed = canonical_authority(raw_host)
+    if host_parsed is None:
+        return f"Host {raw_host!r} 无法解析"
+    host_name, host_port = host_parsed
+    # 端口：Host 是我们自己监听的端口（一定带）；Origin 没写端口时按 scheme 的默认端口比。
+    want_port = host_port or origin_port
+    if origin_host != host_name or origin_port != want_port:
+        return f"Origin {origin!r} 与 Host {raw_host!r} 不同源"
+    return ""
+
+
+def host_reason(headers) -> str:
+    """请求头是否来自一个可信来源；可信回 ``""``，否则回**原因**（给人看的一句话）。
+
+    判定顺序与 DSH 的 ``isTrustedApiRequest`` 一致：
+    ① ``Host`` 必须存在且可信；② ``Sec-Fetch-Site: cross-site`` 直接拒绝
+    （浏览器自己标的跨站，比 Origin 更早、更可靠）；③ 带了 ``Origin`` 就必须与
+    ``Host`` 同源。三条都不依赖客户端可以随便伪造的字段组合。
+    """
+    try:
+        raw_host = headers.get("Host") if headers else None
+    except Exception:                                 # noqa: BLE001
+        return "缺少 Host 头"
+    if not raw_host:
+        return "缺少 Host 头"
+    if not trusted_authority(raw_host):
+        return (f"Host {raw_host!r} 不在白名单里（本服务只接受本机回环；"
+                "要放行别的名字，设 DSH_VIEW_TRUSTED_HOSTS，逗号分隔）")
+    try:
+        site = (headers.get("Sec-Fetch-Site") or "").strip().lower()
+    except Exception:                                 # noqa: BLE001
+        site = ""
+    if site == "cross-site":
+        return "浏览器标记为 Sec-Fetch-Site: cross-site（跨站请求）"
+    try:
+        origin = headers.get("Origin")
+    except Exception:                                 # noqa: BLE001
+        origin = None
+    if not origin:
+        return ""
+    return origin_reason(origin, raw_host)
 
 
 # ---------------------------------------------------------------- 依赖自检
@@ -4069,7 +4327,8 @@ def page_labels(sid: str, display: str):
         if input_enabled():
             note = "点击画面即可操作（会注入到本机真实的鼠标键盘）"
         else:
-            note = "只读观看 —— 未开启输入注入（设 DSH_VIEW_INPUT=1 再重启可开）"
+            note = ("只读观看 —— 未开启输入注入"
+                    "（DSH 里「设置 → 插件 → 显示器面板」可开，或设 DSH_VIEW_INPUT=1 后重启服务）")
         if BACKEND == "darwin":
             note += " · darwin 后端尚未真机验证"
     else:
@@ -4097,7 +4356,8 @@ def index_html() -> str:
                  "同一块屏。<br>"
                  "输入注入：" + ("<strong>已开启</strong>（DSH_VIEW_INPUT=1）"
                                 "，页面上的点击/按键会落在真实桌面上。"
-                                if MAC_INPUT else "关闭（只读观看；要开设 DSH_VIEW_INPUT=1）")
+                                if MAC_INPUT
+                                else "关闭（只读观看；在 DSH 设置里开，或设 DSH_VIEW_INPUT=1）")
                  + "<br><em>darwin 后端尚未在真机验证过，欢迎回报结果。</em></p>")
     elif BACKEND == "win32":
         title = "DSH 显示器（Windows · 真实桌面）"
@@ -4146,6 +4406,14 @@ class Handler(BaseHTTPRequestHandler):
     #: 当前请求的 body（懒读一次；读了多少也要记下来，见 _body_bytes / _drain_request_body）
     _body = None
     _body_read = 0
+    #: 令牌是否来自查询串（决定要不要回种 Cookie）。
+    #:
+    #: ⚠️ 只在 `_auth()` 里赋值是不够的：`do_OPTIONS` / `do_unsupported` /
+    #: `do_HEAD` 走的是 `_host_ok()` → `_send()` → `_head()`，**不经过 `_auth()`**，
+    #: 于是 `_head` 读它会抛 `AttributeError` —— 表现是"同源 OPTIONS/PUT 一个字节
+    #: 都不回"（连接直接断），而契约承诺的是 204/405。所以给它一个**类级默认值**，
+    #: 任何入口都不会再踩空。
+    _cookie_from_query = False
 
     # ------------------------------------------------------------ 基础设施
     def log_message(self, *args) -> None:            # 静音：日志留给真正的错误
@@ -4209,9 +4477,18 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     def _head(self, code: int, ctype: str, length=None, extra=()) -> None:
+        """发响应头。**不设 CORS 头**（见上方 :func:`host_reason` 的说明）。
+
+        删掉 ``Access-Control-Allow-Origin: *`` 是刻意的：面板只走 DSH 自己的
+        同源代理，独立页面也是同源访问，**跨源读本服务从来不是受支持的用法**；
+        通配 CORS 只会让"任意网页读本机回环"这件危险的事变容易。
+
+        Host 校验**不在这一层**：它在每个请求的入口（``_auth`` / :meth:`do_OPTIONS`
+        / :meth:`do_unsupported`）就做完了，这样"没通过来源校验的请求"不会先跑一段
+        业务逻辑（例如把 Xvfb 拉起来）再被拒。这一层只管写头。
+        """
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Access-Control-Allow-Origin", "*")
         if self.close_connection:
             # 明确告诉客户端"用完就关"：否则它会按 HTTP/1.1 的默认语义把这条连接放回池子，
             # 下一次请求才发现服务端已经关了（undici 会报 socket hang up）。
@@ -4232,6 +4509,39 @@ class Handler(BaseHTTPRequestHandler):
         if length is not None:
             self.send_header("Content-Length", str(length))
         self.end_headers()
+
+    def _host_403(self, reason: str) -> None:
+        """来源不可信：写 403 并**关连接**。
+
+        关连接是必要的：不可信的请求体我们不会去读，留着这条 keep-alive 连接
+        只会让残留字节变成下一条请求的"起始行"。
+        """
+        # 面板里看不到这条 403 的正文（跨源响应读不了），所以同时落一行日志：
+        # 用户配错代理/白名单时，`viewer.log` 才是唯一能说清原因的地方。
+        try:
+            print(f"[host] 拒绝请求：{reason}（Host={self.headers.get('Host')!r} "
+                  f"Origin={self.headers.get('Origin')!r}）", file=sys.stderr, flush=True)
+        except Exception:                                 # noqa: BLE001
+            pass
+        body = json.dumps(
+            {"ok": False, "error": "forbidden host/origin", "reason": reason},
+            ensure_ascii=False).encode("utf-8")
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        self._write(body)
+
+    def _host_ok(self) -> bool:
+        """来源校验的统一入口：通过了回 True，否则写 403 并回 False。"""
+        reason = host_reason(self.headers)
+        if not reason:
+            return True
+        self._host_403(reason)
+        return False
 
     def _write(self, body: bytes) -> bool:
         try:
@@ -4265,7 +4575,14 @@ class Handler(BaseHTTPRequestHandler):
             f"或带上 ?k=<{os.path.join(HOME_DIR, 'token')} 的内容>")
 
     def _auth(self) -> bool:
-        """校验令牌；成功时记下"令牌来自查询串"，用于回种 Cookie。"""
+        """校验来源（Host/Origin）与令牌；成功时记下"令牌来自查询串"，用于回种 Cookie。
+
+        两道防线**都要过**，顺序是"来源 → 令牌"：来源不对的请求连令牌都不该被
+        拿去做比较（少一次未知输入的路径）。来源不过时 :meth:`_host_ok` 已经把
+        403 写出去了。
+        """
+        if not self._host_ok():
+            return False
         self._cookie_from_query = bool(query_token(self.path))
         if token_ok(self.path, self.headers):
             return True
@@ -4443,7 +4760,6 @@ class Handler(BaseHTTPRequestHandler):
         pipe.subscribe()
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("X-Accel-Buffering", "no")   # 反向代理别攒着这批字节
@@ -4519,6 +4835,51 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._post_close(sid)
 
+    # ------------------------------------------------------------ 其它方法
+    def do_OPTIONS(self) -> None:                    # noqa: N802
+        """预检请求：**明确拒绝**，不再回"允许一切"。
+
+        本服务的跨源读从来不是受支持的用法（面板走宿主同源代理），所以预检的
+        正确答复是"不行"。这里**只做来源校验、不做令牌校验**：预检请求按规范
+        不带凭据（Cookie），拿令牌要求它等于认定所有合法跨源都失败——而合法
+        跨源本来就不存在。同源访问不触发预检，不受影响。
+        """
+        if not self._host_ok():
+            return
+        self._send(204, b"", "text/plain; charset=utf-8")
+
+    def do_PUT(self) -> None:                        # noqa: N802
+        self.do_unsupported()
+
+    def do_HEAD(self) -> None:                       # noqa: N802
+        """HEAD：只回"服务活着"，不回任何业务量。
+
+        探活脚本（``selfcheck.py``、``/health`` 的调用方）用它最省事；这里**不落
+        ``_head`` 的缓存/``Set-Cookie`` 逻辑**是有意的：HEAD 不该有副作用。
+        """
+        if not self._host_ok():
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.send_header("Cache-Control", "no-store")
+        if self.close_connection:
+            self.send_header("Connection", "close")
+        self.end_headers()
+
+    def do_PATCH(self) -> None:                      # noqa: N802
+        self.do_unsupported()
+
+    def do_unsupported(self) -> None:
+        """未实现的方法统一回 405（默认实现回 501）。
+
+        501 会让客户端以为"服务端坏了"，而事实是"这个方法本来就不该用"。
+        先过来源校验：不信任的请求连"有哪些方法"都不必告诉它。
+        """
+        if not self._host_ok():
+            return
+        self._send(405, b"", "text/plain; charset=utf-8", extra=(("Allow", "GET, POST, DELETE, OPTIONS"),))
+
     def _post_stream_config(self, sid: str) -> None:
         """改档（契约 §5.2）：``POST /s/<sid>/stream-config``。
 
@@ -4552,6 +4913,20 @@ class Handler(BaseHTTPRequestHandler):
                          "effective": sess.pipe.effective_config()})
 
     def _post_input(self, sid: str) -> None:
+        # ⚠️ 注入关闭时要**明确拒绝**，不能"收下但不做"。
+        #
+        # 这条路径不只服务浏览器：宿主的 `display_panel_input` 工具（AI 直接调）也走它。
+        # 早先的做法是照收、`enqueue` 成功、回 `{"ok":true}` —— 真实的注入失败只在
+        # `sess.last_input_error` 里、由 `/state` 事后暴露。对"真实桌面只读观看"这个
+        # 场景来说，"回 ok 但什么都没发生"比报错更糟：调用方以为点到了。
+        # 客户端已经在入队前拦了一层（弹确认框），这一层是给**绕过客户端**的调用方
+        # （AI 工具、curl 脚本）兜底的 —— 两道都要有。
+        if not input_enabled():
+            self._error(
+                403, "输入注入未开启（当前只读观看）",
+                "真实桌面后端默认关闭注入；在 DSH 的「设置 → 插件 → 显示器面板」里打开，"
+                "或设 DSH_VIEW_INPUT=1 后重启服务")
+            return
         try:
             payload = self._read_json()
         except ValueError as exc:

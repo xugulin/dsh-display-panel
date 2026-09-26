@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.7.0，冻结）
+# dsh-display-panel 接口契约（v0.8.0，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
@@ -35,7 +35,28 @@
 
 ## 1. 显示器服务（Python）对外契约
 
-所有响应都带 `Cache-Control: no-store`。`k=<token>` 仍是必需（服务监听 127.0.0.1，同机其它用户可连）。
+所有响应都带 `Cache-Control: no-store`。
+
+**两道防线（0.8.0 起，缺一不可）：**
+
+1. **来源校验**（`host_reason()`）：`Host` 必须是回环（`127.0.0.0/8`、`localhost`、`[::1]`，
+   或 `DSH_VIEW_TRUSTED_HOSTS` 里的条目）；带了 `Origin` 就必须与 `Host` 同源；
+   `Sec-Fetch-Site: cross-site` 一律拒。判定语义与 DSH 自己的
+   `isTrustedApiRequest`（`@deepseek-ai/dsh-client-connection`）对齐，包含 WHATWG 的
+   IPv4 等价写法（`0x7f.0.0.1` / `2130706433` / `127.1` → `127.0.0.1`）与
+   `ends in a number` 规则（`1.2.3.4.5` 这种"像 IPv4 但非法"的**不得**当域名放行）。
+   不过 → **403**（正文里有 `reason`，同时往 stderr 落一行）。
+2. **令牌**（`?k=` 或 Cookie，`hmac.compare_digest` 比较）。令牌缺失时**不设防**的旧行为保留
+   （写令牌文件失败的那种环境）。
+
+**CORS：不发任何 `Access-Control-Allow-Origin`**（0.8.0 起）。面板只走宿主同源代理，
+跨源读本服务从来不是受支持的用法；`OPTIONS` 预检明确回 **403**。
+理由见 §0 与 README「显示器服务」一节：浏览器里任意网页都能打本机回环，
+`text/plain` 的"简单请求"不触发预检，DNS rebinding 时 Host 是攻击者域名 ——
+令牌挡不住这两种。
+
+**未实现的方法**（PUT/PATCH 等）回 **405**（不是 501），且**先过来源校验**：
+不对不可信来源透露"有哪些方法"。`HEAD /` 回 200 空体（探活用，无副作用）。
 
 ### 1.1 全局（与具体会话无关，**绝不创建会话/不启动 Xvfb**）
 
@@ -85,7 +106,12 @@
 
 `DSH_DISPLAY_HOME`（默认 `~/.cache/dsh-display`）、`DSH_VIEW_PORT`（默认 8099）、
 `DSH_VIEW_SIZE`（默认 1600x1000）、`DSH_VIEW_BACKEND`、`DSH_VIEW_INPUT`（win32/darwin 注入开关）、
-`DSH_VIEW_LOG`、新增 `DSH_VIEW_IDLE_MINUTES`（会话空闲回收，默认 30；0=不回收）。
+`DSH_VIEW_LOG`、`DSH_VIEW_IDLE_MINUTES`（会话空闲回收，默认 30；0=不回收）、
+`DSH_VIEW_TRUSTED_HOSTS`（0.8.0 新增：**额外**放行的 Host，逗号分隔；正常用不到，服务只监听回环）。
+
+⚠️ `DSH_VIEW_SIZE` / `DSH_VIEW_IDLE_MINUTES` / `DSH_VIEW_INPUT` 这三项可以被 **GUI 设置卡片**
+覆盖（§2 的"设置面"）：卡片设过的字段优先，没设过的回落到环境变量，都没有才用内置默认值。
+宿主把生效值折成这三个环境变量传给服务进程，所以**服务端代码仍然只认环境变量**，不需要知道卡片存在。
 
 ## 2. 宿主半边 `lib/index.js` 对外契约
 
@@ -109,6 +135,7 @@
 | GET | `P/procs?session=<sid>` | 透传会话显示上的进程列表 |
 | POST | `P/kill?session=<sid>` | 杀掉会话显示上的某个进程（body `{pid}`） |
 | POST | `P/close?session=<sid>` | **关闭该会话的显示器**（上游 `POST /s/<sid>/close`，见 §6.0） |
+| POST | `P/config` | 写设置：`{"size"?,"idleMinutes"?,"inputEnabled"?,"restart"?}` → `{"ok":true,"config":{...},"service":{...}}`。逐个字段校验（非法回 400）；宿主没有设置面时回 **501 且不写任何东西**（不假装成功）。默认 `restart:true`（这三项由服务进程消费，必须重启才生效） |
 
 要点：
 
@@ -121,6 +148,26 @@
   然后轮询 `/health` 最多 ~8 秒。找不到 python3 → `missing` 里明说。
 * **超时**：所有上游请求 5 秒超时（frame 3 秒）；上游慢不能拖死宿主事件循环（用 `AbortController`）。
 * **绝不能影响 harness 启动**：所有逻辑包 try/catch，失败只打日志。
+* **设置面（三代，0.8.0 新增）**：三项设置（分辨率 / 空闲回收 / 输入注入）由 GUI 卡片管理。
+  宿主这边按 DSH 版本分两条路 ——
+  ① dsh ≥ `0.1.7-alpha.1`：`module.exports.Config`（schemastery，字段标 `.volatile()`），
+     值落 `<profileDir>/cordis.patch.yml` 那一行的 config 里；
+  ② dsh `0.1.5-alpha.1` ~ `0.1.6-alpha.2`：`ctx.settings.register(ns, schema)`，值落
+     `$DSH_HOME/settings.yaml` 的 namespace 段里。
+  **`settings` 这个服务名在三代里都存在但语义不同**（0.1.7 换成了 SettingsForms，
+  `register` 没了），所以必须做**方法级探测**，不能靠服务名判版本。
+  优先级：**卡片值 > 环境变量 > 内置默认值**（三者都在 `resolveDisplayConfig()` 里合并，
+  卡片没设过的字段才回落到环境变量 —— 老用法不会被吃掉）。
+  ⚠️ 为了这条优先级真的成立，`Config` 的字段**一律不带 `.default()`**：带了的话
+  cordis 会把默认值填进 `fiber.config`，宿主就再也分不出"用户设成了默认值"与
+  "用户根本没设"，环境变量那一层会被静默跳过。
+  ⚠️ 两处 key 分属两个域，**不能混用**：取设置面（`configForms.get()` /
+  `settings.update()`）用 **profile entry id**（`cordis.patch.yml` 的 `- id:`，
+  本插件 = `display-panel`）；注册卡片槽位用**包名**（`dsh-display-panel`）。
+  生效路径：宿主拉起服务时把生效值折成 `DSH_VIEW_SIZE` / `DSH_VIEW_IDLE_MINUTES` /
+  `DSH_VIEW_INPUT` 塞进**子进程环境**（服务只吃环境变量）。
+  拿不到设置面时（schemastery 解析不到、或宿主太老）`Config === undefined`，插件照常工作、
+  只是没有表单 —— 这是刻意选的降级方向（cordis 在 `runtime.Config` 缺席时原样放行）。
 
 ## 2.5 给 AI 用的工具（`lib/tools.js`，由宿主半边注册）
 
@@ -179,6 +226,21 @@ ctx.inject(['tools'], (toolsCtx) => {
 * 槽位注册方式保持现状（已被实测证明可用）：
   `ctx.slots.inject('conversation.view', () => ctx.slots.register({name:'conversation.view', id:'display-panel', order:60, label:()=>t('title'), inject:(sessionId)=>({sessionId: typeof sessionId==='string'?sessionId:''})}, Component))`
 * 组件必须容错：`sessionId` 为空、宿主接口 401/500、服务未起、帧 404 —— 全部要有明确文案，不许白屏。
+* **设置卡片（0.8.0 新增）**：注册三项设置（分辨率 / 空闲回收 / 输入注入）。
+  三代的设置面与槽位不同，本文件按**能力探测**分叉（`applySettings()`）：
+  * 设置面：`ctx.inject(['configForms'])`（dsh ≥ 0.1.7，`<行 id>` 取 ConfigForm）
+    或 `ctx.inject(['settingsScope'])`（dsh ≤ 0.1.6，`bind({namespace})`）；
+    两者都提供同形的 `getSnapshot()/set(field,value)/unset(field)`。
+  * 卡片槽位：`settings.plugin.item`（≤ 0.1.6-alpha.1，key = namespace）
+    与 `plugins.bundle.config`（≥ 0.1.6-alpha.2，key = 包名）。
+  * ⚠️ **静态 `inject: ['slots']` 里绝不能加版本相关的服务名** —— 服务缺席时整份 apply
+    会静默 PENDING（面板会一起消失）；`ctx.inject([...], cb)` 分叉才是安全的。
+  * 卡片**不声明** `locale:`（声明了渲染时会要求宿主装了 locale face），
+    文案语言由本文件既有的 `pickLang()` 判。
+* **注入确认（0.8.0 新增）**：真实桌面（`realDesktop`）且注入关着时，状态条出现「打开注入」。
+  点击**只弹确认框**，确认后才 POST `P/config`；`/config` 回 404/501 时如实显示
+  "这个宿主版本不支持"，不假装成功。只读期间点画面**不静默丢事件**，而是弹同一个确认框
+  （否则用户会看到"点不动 + 状态条冒出输入发送失败"，像是坏了）。
 
 ## 4. 环境事实（必须写进实现和文档）
 

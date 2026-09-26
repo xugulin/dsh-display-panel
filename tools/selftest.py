@@ -186,6 +186,152 @@ def static_checks() -> None:
         record("viewer 有 sid 字符集校验（^[A-Za-z0-9._-]{1,64}$）", has_re,
                "契约 §1.2：旧实现直接把 sid 拼进文件路径")
 
+    # 6.5) 来源校验（Host/Origin）与 CORS
+    #
+    # 这一组是**纯函数**断言，与后端无关，所以在任何平台上都必须跑。
+    # 背景：服务监听的端口，浏览器里任意网页都能打；`fetch` 用
+    # `Content-Type: text/plain` 发的是"简单请求"**不触发预检**，所以
+    # `POST /input` 这类写操作能被跨源页面直接打进来。令牌挡得住"没令牌"，
+    # 但挡不住"带着用户凭据的跨源请求"与 DNS rebinding —— 前者靠 Origin /
+    # Sec-Fetch-Site 判，后者靠 Host 白名单判（rebinding 时 Host 是攻击者域名）。
+    if VIEWER.exists():
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location("ddp_viewer", VIEWER)
+            _viewer = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_viewer)
+
+            # ⚠️ 服务端必须**不再**发通配 CORS：同源代理不需要它，
+            # 而它会把"任意网页读本机回环"从"做不到"变成"只差一个 DNS"。
+            # 用 AST 找真正的 `send_header("Access-Control-Allow-Origin", ...)` 调用：
+            # 纯文本匹配会把注释/文档字符串里提到这个名字也算成违规。
+            import ast as _ast
+            _cors_lines = []
+            try:
+                _tree = _ast.parse(Path(_viewer.__file__).read_text(encoding="utf-8"))
+                for _node in _ast.walk(_tree):
+                    if not isinstance(_node, _ast.Call):
+                        continue
+                    _fn = _node.func
+                    if not (isinstance(_fn, _ast.Attribute) and _fn.attr == "send_header"):
+                        continue
+                    _args = _node.args
+                    if _args and isinstance(_args[0], _ast.Constant) \
+                            and str(_args[0].value).lower() == "access-control-allow-origin":
+                        _cors_lines.append(_node.lineno)
+            except SyntaxError as _exc:
+                _cors_lines = [f"AST 解析失败: {_exc}"]
+            record("viewer 不再无条件发 Access-Control-Allow-Origin: *", not _cors_lines,
+                   f"第 {_cors_lines[:5]} 行" if _cors_lines else "")
+
+            _ca = _viewer.canonical_authority
+            _ca_cases = [
+                # (authority, 期望规范化结果, 为什么)
+                ("127.0.0.1:8099", ("127.0.0.1", "8099"), "正常回环"),
+                ("127.0.0.1", ("127.0.0.1", ""), "无端口"),
+                ("LOCALHOST", ("localhost", ""), "大小写不敏感"),
+                ("[::1]:8099", ("[::1]", "8099"), "IPv6 回环带端口"),
+                ("[0:0:0:0:0:0:0:1]", ("[::1]", ""), "展开写法的 IPv6 回环"),
+                ("0x7f.0.0.1", ("127.0.0.1", ""), "十六进制写法的回环（WHATWG 等价形式）"),
+                ("2130706433", ("127.0.0.1", ""), "十进制整数写法的回环"),
+                ("0x7f000001", ("127.0.0.1", ""), "单个十六进制整数"),
+                ("0177.0.0.1", ("127.0.0.1", ""), "八进制段"),
+                ("127.1", ("127.0.0.1", ""), "末段独占剩余字节（URL 标准）"),
+                ("127.0.0.1.", ("127.0.0.1", ""), "尾随点"),
+                ("dsh.internal", ("dsh.internal", ""), "普通域名照常接受"),
+                ("a-b.example.com:443", ("a-b.example.com", "443"), "带端口域名"),
+                ("127.0.0.1.evil.com", ("127.0.0.1.evil.com", ""), "是合法域名，但**不是**回环"),
+                ("127.0.0.1:08099", None, "零填充端口会被浏览器规范化，必须拒绝"),
+                ("http://127.0.0.1", None, "不是裸 authority"),
+                ("user@127.0.0.1", None, "userinfo 形态（会授权内嵌主机名）"),
+                ("127.0.0.1/path", None, "带路径"),
+                ("", None, "空"),
+                ("evil.com:80a", None, "端口不是数字"),
+                ("0x7f.0.0.256", None, "以数字结尾但越界：浏览器解析会失败"),
+                ("1.2.3.4.5", None, "五段数字：同上"),
+                ("999999999999", None, "整数越界：同上"),
+                ("example.123", None, "以数字结尾的域名：URL 标准判它非法"),
+            ]
+            _ca_bad = [why for value, want, why in _ca_cases if _ca(value) != want]
+            record("Host 规范化：与 DSH/WHATWG 的 authority 语义一致",
+                   not _ca_bad, f"不符：{_ca_bad}" if _ca_bad else f"{len(_ca_cases)} 例")
+
+            _trusted_cases = [
+                ("127.0.0.1:8099", True, "回环任意端口"),
+                ("localhost:1", True, "localhost 任意端口"),
+                ("127.5.5.5", True, "整段 127/8 都算回环"),
+                ("[::1]:8099", True, "IPv6 回环"),
+                ("0x7f000001:8099", True, "十六进制写法规范化后仍是回环"),
+                ("evil.com", False, "外域"),
+                ("evil.com:8099", False, "外域带端口"),
+                ("127.0.0.1.evil.com", False, "前缀伪装（DNS rebinding 常用形态）"),
+                ("1.2.3.4.5", False, "非法 IPv4 形式不得当域名放行"),
+                ("0x7f.0.0.256", False, "越界的十六进制形式"),
+                ("", False, "空 Host"),
+            ]
+            _t_bad = [why for value, want, why in _trusted_cases
+                      if _viewer.trusted_authority(value) is not want]
+            record("Host 白名单：只信本机回环（含 127/8、::1、localhost、等价写法）",
+                   not _t_bad, f"不符：{_t_bad}" if _t_bad else f"{len(_trusted_cases)} 例")
+
+            _reason_cases = [
+                ({"Host": "127.0.0.1:8099"}, "", "面板走同源代理的默认形态"),
+                ({"Host": "localhost:8099"}, "", "localhost"),
+                ({"Host": "127.0.0.1:8099", "Sec-Fetch-Site": "same-origin"}, "", "同源标记"),
+                ({"Host": "127.0.0.1:8099", "Origin": "http://127.0.0.1:8099"}, "", "Origin 与 Host 同源"),
+                ({"Host": "127.0.0.1:8099", "Origin": "http://127.0.0.1:8099",
+                  "Sec-Fetch-Site": "same-site"}, "", "same-site 仍看 Origin"),
+                ({}, "缺少 Host", "没有 Host 头"),
+                ({"Host": "evil.com"}, "Host", "外域 Host"),
+                ({"Host": "127.0.0.1.evil.com"}, "Host", "rebinding 伪装的 Host"),
+                ({"Host": "127.0.0.1:8099", "Sec-Fetch-Site": "cross-site"}, "cross-site", "浏览器标记跨站"),
+                ({"Host": "127.0.0.1:8099", "Origin": "https://evil.com"}, "Origin", "Origin 与 Host 不同源"),
+                ({"Host": "127.0.0.1:8099", "Origin": "http://127.0.0.1:9000"}, "Origin", "同主机不同端口也算跨源"),
+            ]
+            _r_bad = []
+            for headers, want, why in _reason_cases:
+                got = _viewer.host_reason(headers)
+                if want == "":
+                    if got != "":
+                        _r_bad.append(f"{why}：期望通过，实得 {got!r}")
+                elif want not in got:
+                    _r_bad.append(f"{why}：期望原因含 {want!r}，实得 {got!r}")
+            record("host_reason：Host / Origin / Sec-Fetch-Site 三条都判对",
+                   not _r_bad, "；".join(_r_bad) if _r_bad else f"{len(_reason_cases)} 例")
+        except Exception as exc:                                  # noqa: BLE001
+            record("来源校验（Host/Origin）纯函数断言", FAIL,
+                   f"{type(exc).__name__}: {exc}")
+
+    # 6.6) 设置卡片的 key 域：宿主/客户端用的"行 id"必须与 cordis.patch.yml 一致
+    #
+    # 这条钉的是一个**致命但静默**的错误：dsh-settings 的 describe()/update() 与
+    # 客户端的 configForms.get() 只认 profile entry id（= patch 里的 `- id:`），
+    # 而卡片槽位 plugins.bundle.config 的 key 是**包名**。混用的表现不是报错，
+    # 而是"卡片在、里面空的、保存还说已保存" —— 所以必须静态钉住。
+    if INDEX_JS.exists() and CLIENT_JS.exists() and (ROOT / "cordis.patch.yml").exists():
+        patch_text = (ROOT / "cordis.patch.yml").read_text(encoding="utf-8")
+        m_id = re.search(r"^\s*-\s*id:\s*([A-Za-z0-9._-]+)\s*$", patch_text, re.M)
+        m_name = re.search(r"^\s*name:\s*'([^']+)'\s*$", patch_text, re.M)
+        row_id = m_id.group(1) if m_id else None
+        pkg_name = m_name.group(1) if m_name else None
+        record("cordis.patch.yml 同时声明了 id 与 name（id=行标识、name=包名）",
+               bool(row_id and pkg_name), f"id={row_id} name={pkg_name}")
+        if row_id:
+            index_text = INDEX_JS.read_text(encoding="utf-8")
+            client_text = CLIENT_JS.read_text(encoding="utf-8")
+            m_host = re.search(r"const SETTINGS_NAMESPACE = '([^']+)'", index_text)
+            m_form = re.search(r"const FORM_KEY = '([^']+)'", client_text)
+            m_slot = re.search(r"const SLOT_KEY = '([^']+)'", client_text)
+            record("宿主用的行 id 与 cordis.patch.yml 的 id 一致",
+                   bool(m_host) and m_host.group(1) == row_id,
+                   f"index.js={m_host.group(1) if m_host else '?'} patch={row_id}")
+            record("客户端取设置面用的行 id 与 patch 一致",
+                   bool(m_form) and m_form.group(1) == row_id,
+                   f"client.js={m_form.group(1) if m_form else '?'} patch={row_id}")
+            record("客户端卡片槽位的 key 是**包名**（不是行 id）",
+                   bool(m_slot) and m_slot.group(1) == pkg_name,
+                   f"client.js={m_slot.group(1) if m_slot else '?'} 包名={pkg_name}")
+
     # 7) 冻结契约本身
     record("docs/CONTRACT.md 存在", CONTRACT.exists())
     if CONTRACT.exists() and (ROOT / "package.json").exists():
@@ -384,6 +530,18 @@ HOST_PROBE_JS = r"""
 // 然后调用它注册的路由 —— 用来证明「令牌没有被交给浏览器」这类安全断言。
 const target = process.argv[2]
 const TOKEN = process.env.__PROBE_TOKEN || ''
+// 这个探针进程的 argv[1] 是探针自己，跟**真实宿主进程**（argv[1] = dsh 的入口脚本）
+// 不一样，所以插件内部的"锚点推导"在这里找不到 DSH 安装位置。为了测到与真机一致
+// 的行为，这里显式把锚点指过去（等价于真实宿主里自动推导出来的那个值）。
+// 找不到就留空 —— 那正好顺便验证"降级为无表单"这条路径不会崩。
+try {
+  const fsx = require('fs'), pathx = require('path')
+  for (const base of ['/home/xgl/.npm-global/lib/node_modules',
+                      pathx.join(process.env.HOME || '', '.npm-global/lib/node_modules')]) {
+    const anchor = pathx.join(base, '@deepseek-ai/dsh/package.json')
+    if (fsx.existsSync(anchor)) { process.env.DSH_INSTALL_ANCHOR = anchor; break }
+  }
+} catch (e) { /* 探针自己的便利，失败就当没有 */ }
 const routes = []
 let rejection
 function collect(args) {
@@ -411,10 +569,63 @@ const ctx = {
   logger: console,
   slots: { inject: () => {}, register: () => () => {} },
 }
-const out = { routes: [], errors: [], info: null, status401: null, infoBody: '' }
+const out = { routes: [], errors: [], info: null, status401: null, infoBody: '', settings: null }
 ;(async () => {
 try {
   const mod = require(target)
+  // ── 设置卡片：Config 必须是**真 schemastery**，而且要能被 dsh-settings 的
+  //    volatileForm() 投影出表单（它就靠 schema.meta.volatile 与 schema.dict）。
+  //    漏一个 .volatile() 的后果是"这一项在 GUI 里根本不出现"，很难查，所以钉在这里。
+  try {
+    const z = mod.Config
+    if (z === undefined) {
+      out.settings = { present: false }
+    } else {
+      const volatileForm = (schema) => {
+        if (schema.meta && schema.meta.volatile) return schema
+        if (schema.type === 'object') {
+          const dict = Object.fromEntries(Object.entries(schema.dict || {}).flatMap(([k, child]) => {
+            const field = volatileForm(child)
+            return field === undefined ? [] : [[k, field]]
+          }))
+          return Object.keys(dict).length === 0 ? undefined : { type: 'object', dict }
+        }
+        return undefined
+      }
+      const form = volatileForm(z)
+      let toJsonOk = false
+      try { const j = z.toJSON(); toJsonOk = !!j && j.uid !== undefined } catch (e) { toJsonOk = false }
+      let validateOk = false
+      let validatedFields = []
+      let unsetFields = null
+      try {
+        const v = z['~standard'].validate({})
+        validateOk = !v.issues
+        validatedFields = Object.keys(v.value || {})
+        // ⚠️ 关键断言：**什么都没设**时不能有值。
+        //    字段若带 `.default()`，cordis 会把默认值填进 fiber.config，于是宿主侧
+        //    "没设置就回落到 DSH_VIEW_* 环境变量"那段逻辑永远走不到（真出过：
+        //    DSH_VIEW_IDLE_MINUTES / DSH_VIEW_INPUT 静默失效）。
+        // 注意：`required(false)` 的字段**键仍然存在**、只是值为 undefined
+        // （schemastery 的行为），所以判据是"有没有值"，不是"有没有键"。
+        const empty = z['~standard'].validate(undefined)
+        const raw = (empty && empty.value) || {}
+        unsetFields = Object.keys(raw).filter((key) => {
+          const field = raw[key]
+          const plain = field && typeof field.get === 'function' ? field.get() : field
+          return plain !== undefined
+        })
+      } catch (e) { validateOk = false }
+      out.settings = {
+        present: true,
+        formFields: Object.keys((form && form.dict) || {}),
+        toJsonOk,
+        validateOk,
+        validatedFields,
+        unsetFields,
+      }
+    }
+  } catch (e) { out.errors.push('settings: ' + e) }
   try { mod.apply(ctx) } catch (e) { out.errors.push('apply: ' + e) }
   out.routes = routes.map((r) => r.path)
   // 路由可能是 exact(/info)、也可能是一个前缀兜底路由 —— 两种都认
@@ -499,6 +710,27 @@ def host_probe(home: Path) -> None:
        '"ok"' in body and "port" in body, body[:200])
     ok("宿主把鉴权拒绝透传给浏览器（401）",
        data.get("status401") in (401, 403), f"requestRejection→401 时实际返回 {data.get('status401')}")
+
+    # 设置卡片（0.8.0）：Config 必须能被 dsh-settings 的 volatileForm 投出三个字段。
+    # 拿不到 schemastery 时 Config 是 undefined —— 那是**允许的降级**（插件照常工作、
+    # 只是没有表单），所以那种情况单独记一条 SKIP，不要当成失败。
+    settings = data.get("settings") or {}
+    if not settings.get("present"):
+        skip("设置卡片：Config 三个字段都能被 dsh-settings 投影成表单",
+             "解析不到 @deepseek-ai/schemastery（Config 降级为 undefined）")
+    else:
+        want = ["size", "idleMinutes", "inputEnabled"]
+        ok("设置卡片：Config 三个字段都能被 dsh-settings 投影成表单",
+           sorted(settings.get("formFields") or []) == sorted(want),
+           f"实际字段 {settings.get('formFields')}")
+        ok("设置卡片：Config.toJSON() 可序列化（describe 要拿它算 revision）",
+           settings.get("toJsonOk") is True, "")
+        ok("设置卡片：Config 能过 cordis 的 resolveConfig（~standard.validate）",
+           settings.get("validateOk") is True,
+           f"校验后字段 {settings.get('validatedFields')}")
+        ok("设置卡片：未设置时三项都**没有**值（否则 env 兜底是死代码）",
+           settings.get("unsetFields") == [],
+           f"validate(undefined) 给出 {settings.get('unsetFields')}")
 
 
 # ====================================================================== 动态检查
