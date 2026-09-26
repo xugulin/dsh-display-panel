@@ -243,7 +243,7 @@ bash scripts/uninstall-service.sh --purge                 # 连 <home> 一起删
 状态条会显示：后端（x11/wayland/win32/darwin）、分辨率、是否可注入、
 Windows/macOS 上还会明确写「**真实桌面**」（那上面动的是你的真键鼠）。
 
-#### 真实桌面上的「打开注入」要过一次确认（0.8.0 起）
+#### 真实桌面上的「打开注入」要过一次确认（0.8.x 起）
 
 Linux 上每个会话是一台**独立虚拟显示**，注入本来就开着，什么都不会弹。
 Windows / macOS 上抓到的是**本机真实桌面**（所有会话共用那一块屏），
@@ -313,7 +313,7 @@ curl -s -X POST 'http://127.0.0.1:<DSH端口>/api/dsh-display-panel/exec?session
 两者不是"新旧替代"关系，而是"能用"与"更稳、更可诊断"的差别。文档以前只写了前一种，
 现在两种都写清楚。
 
-### 设置卡片（0.8.0 起，无需环境变量）
+### 设置卡片（0.8.x 起，无需环境变量）
 
 DSH 的**设置 → 插件**里有一张「显示器面板」卡片，三项可直接改：
 
@@ -449,7 +449,7 @@ python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --
 这些口**面板不走**（面板走上面的同源代理）。给脚本/AI 直接用时必须带 `?k=<token>`
 （令牌是给"同机其它用户"设的闸：服务监听 127.0.0.1，别的用户也能连上）。
 
-**两道防线，缺一不可**（0.8.0 起）：
+**两道防线，缺一不可**（0.8.x 起）：
 
 1. **Host / Origin 白名单**：只接受 `127.0.0.0/8`、`localhost`、`[::1]` 的 Host；
    带了 `Origin` 就必须与 Host 同源；`Sec-Fetch-Site: cross-site` 直接拒。
@@ -463,7 +463,7 @@ python3 tools/session-wall.py --file "<会话记录>" --title 内存卡检测 --
 `Content-Type: text/plain` 发的是"简单请求"**不触发预检** —— `POST /input`
 能被跨源页面直接打进来（读不到响应，但事件已经注进去了）；DNS rebinding
 更狠：攻击者把自己的域名解析到 `127.0.0.1`，此时请求在浏览器看来是同源的。
-`Access-Control-Allow-Origin: *` 在 0.8.0 里被**删掉**了（同源代理从来不需要它），
+`Access-Control-Allow-Origin: *` 在 0.8.x 里被**删掉**了（同源代理从来不需要它），
 `OPTIONS` 预检也改成明确拒绝。
 
 | 方法 | 路径 | 说明 |
@@ -516,7 +516,7 @@ python3 tools/selftest.py        # 端到端自测：临时 HOME + 临时 DSH_DI
                                  # 自己起服务、自己收尸；覆盖 /health 无副作用、sid 校验、注入顺序、会话隔离…
 ```
 
-下面几个是**针对 0.8.0 新增功能**的独立验证脚本（都在 `.verify/`，都是**只读或隔离**的：
+下面几个是**针对 0.8.x 新增功能**的独立验证脚本（都在 `.verify/`，都是**只读或隔离**的：
 临时目录 + 随机端口，不碰你的 `~/.cache/dsh-display`，也不动你的 DSH 配置）：
 
 ```sh
@@ -611,7 +611,7 @@ curl -s -X POST "http://127.0.0.1:<服务端口>/s/<sid>/exec?k=<token>" -H 'con
   `Unit process … remains running after unit stopped`。
 * **令牌只在宿主侧**：面板拿不到令牌，也就没法把它写进 URL / 历史 / Referer。
 
-### 0.8.0 这一轮踩到的坑（都留了钉子）
+### 0.8.x 这一轮踩到的坑（都留了钉子）
 
 * **pnpm 的 24 小时发布冷静期**：`minimumReleaseAge` 默认 **1440**，于是
   `add <包名>`（甚至 `add <包名>@latest`）都装到**上一个**版本，而报错/输出里

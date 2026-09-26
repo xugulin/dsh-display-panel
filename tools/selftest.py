@@ -711,7 +711,7 @@ def host_probe(home: Path) -> None:
     ok("宿主把鉴权拒绝透传给浏览器（401）",
        data.get("status401") in (401, 403), f"requestRejection→401 时实际返回 {data.get('status401')}")
 
-    # 设置卡片（0.8.0）：Config 必须能被 dsh-settings 的 volatileForm 投出三个字段。
+    # 设置卡片（0.8.x）：Config 必须能被 dsh-settings 的 volatileForm 投出三个字段。
     # 拿不到 schemastery 时 Config 是 undefined —— 那是**允许的降级**（插件照常工作、
     # 只是没有表单），所以那种情况单独记一条 SKIP，不要当成失败。
     settings = data.get("settings") or {}

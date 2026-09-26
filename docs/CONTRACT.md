@@ -1,4 +1,4 @@
-# dsh-display-panel 接口契约（v0.8.0，冻结）
+# dsh-display-panel 接口契约（v0.8.1，冻结）
 
 > 本文件是**冻结的接口契约**：客户端半边（`lib/client.js`）、宿主半边（`lib/index.js`）、
 > 显示器服务（`service/dsh-display-viewer.py`）三方必须严格按此实现。
@@ -37,7 +37,7 @@
 
 所有响应都带 `Cache-Control: no-store`。
 
-**两道防线（0.8.0 起，缺一不可）：**
+**两道防线（0.8.x 起，缺一不可）：**
 
 1. **来源校验**（`host_reason()`）：`Host` 必须是回环（`127.0.0.0/8`、`localhost`、`[::1]`，
    或 `DSH_VIEW_TRUSTED_HOSTS` 里的条目）；带了 `Origin` 就必须与 `Host` 同源；
@@ -49,7 +49,7 @@
 2. **令牌**（`?k=` 或 Cookie，`hmac.compare_digest` 比较）。令牌缺失时**不设防**的旧行为保留
    （写令牌文件失败的那种环境）。
 
-**CORS：不发任何 `Access-Control-Allow-Origin`**（0.8.0 起）。面板只走宿主同源代理，
+**CORS：不发任何 `Access-Control-Allow-Origin`**（0.8.x 起）。面板只走宿主同源代理，
 跨源读本服务从来不是受支持的用法；`OPTIONS` 预检明确回 **403**。
 理由见 §0 与 README「显示器服务」一节：浏览器里任意网页都能打本机回环，
 `text/plain` 的"简单请求"不触发预检，DNS rebinding 时 Host 是攻击者域名 ——
@@ -107,7 +107,7 @@
 `DSH_DISPLAY_HOME`（默认 `~/.cache/dsh-display`）、`DSH_VIEW_PORT`（默认 8099）、
 `DSH_VIEW_SIZE`（默认 1600x1000）、`DSH_VIEW_BACKEND`、`DSH_VIEW_INPUT`（win32/darwin 注入开关）、
 `DSH_VIEW_LOG`、`DSH_VIEW_IDLE_MINUTES`（会话空闲回收，默认 30；0=不回收）、
-`DSH_VIEW_TRUSTED_HOSTS`（0.8.0 新增：**额外**放行的 Host，逗号分隔；正常用不到，服务只监听回环）。
+`DSH_VIEW_TRUSTED_HOSTS`（0.8.x 新增：**额外**放行的 Host，逗号分隔；正常用不到，服务只监听回环）。
 
 ⚠️ `DSH_VIEW_SIZE` / `DSH_VIEW_IDLE_MINUTES` / `DSH_VIEW_INPUT` 这三项可以被 **GUI 设置卡片**
 覆盖（§2 的"设置面"）：卡片设过的字段优先，没设过的回落到环境变量，都没有才用内置默认值。
@@ -148,7 +148,7 @@
   然后轮询 `/health` 最多 ~8 秒。找不到 python3 → `missing` 里明说。
 * **超时**：所有上游请求 5 秒超时（frame 3 秒）；上游慢不能拖死宿主事件循环（用 `AbortController`）。
 * **绝不能影响 harness 启动**：所有逻辑包 try/catch，失败只打日志。
-* **设置面（三代，0.8.0 新增）**：三项设置（分辨率 / 空闲回收 / 输入注入）由 GUI 卡片管理。
+* **设置面（三代，0.8.x 新增）**：三项设置（分辨率 / 空闲回收 / 输入注入）由 GUI 卡片管理。
   宿主这边按 DSH 版本分两条路 ——
   ① dsh ≥ `0.1.7-alpha.1`：`module.exports.Config`（schemastery，字段标 `.volatile()`），
      值落 `<profileDir>/cordis.patch.yml` 那一行的 config 里；
@@ -226,7 +226,7 @@ ctx.inject(['tools'], (toolsCtx) => {
 * 槽位注册方式保持现状（已被实测证明可用）：
   `ctx.slots.inject('conversation.view', () => ctx.slots.register({name:'conversation.view', id:'display-panel', order:60, label:()=>t('title'), inject:(sessionId)=>({sessionId: typeof sessionId==='string'?sessionId:''})}, Component))`
 * 组件必须容错：`sessionId` 为空、宿主接口 401/500、服务未起、帧 404 —— 全部要有明确文案，不许白屏。
-* **设置卡片（0.8.0 新增）**：注册三项设置（分辨率 / 空闲回收 / 输入注入）。
+* **设置卡片（0.8.x 新增）**：注册三项设置（分辨率 / 空闲回收 / 输入注入）。
   三代的设置面与槽位不同，本文件按**能力探测**分叉（`applySettings()`）：
   * 设置面：`ctx.inject(['configForms'])`（dsh ≥ 0.1.7，`<行 id>` 取 ConfigForm）
     或 `ctx.inject(['settingsScope'])`（dsh ≤ 0.1.6，`bind({namespace})`）；
@@ -237,7 +237,7 @@ ctx.inject(['tools'], (toolsCtx) => {
     会静默 PENDING（面板会一起消失）；`ctx.inject([...], cb)` 分叉才是安全的。
   * 卡片**不声明** `locale:`（声明了渲染时会要求宿主装了 locale face），
     文案语言由本文件既有的 `pickLang()` 判。
-* **注入确认（0.8.0 新增）**：真实桌面（`realDesktop`）且注入关着时，状态条出现「打开注入」。
+* **注入确认（0.8.x 新增）**：真实桌面（`realDesktop`）且注入关着时，状态条出现「打开注入」。
   点击**只弹确认框**，确认后才 POST `P/config`；`/config` 回 404/501 时如实显示
   "这个宿主版本不支持"，不假装成功。只读期间点画面**不静默丢事件**，而是弹同一个确认框
   （否则用户会看到"点不动 + 状态条冒出输入发送失败"，像是坏了）。
